@@ -5,9 +5,9 @@ authors = ["16 server lzw <993096281@qq.com>"]
 edition = "2018"
 build = "build.rs"
 
-#[lib]
-#name = "lib"
-#path = "src/lib.rs"
+[lib]
+name = "lib"
+path = "src/lib.rs"
 
 
 [[bin]]
@@ -18,10 +18,15 @@ path = "src/server.rs"
 name = "client"
 path = "src/client.rs"
 
+[[bin]]
+name = "client_mt"
+path = "src/client_multithread.rs"
+
 [dependencies]
 protobuf = "2.0.2"
 futures = "0.1.16"
 grpcio = { version = "0.4", default-features = false, features = ["protobuf-codec"] }
+chrono = "0.4"
 
 
 [build-dependencies]

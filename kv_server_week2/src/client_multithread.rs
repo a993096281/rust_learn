@@ -1,5 +1,6 @@
 extern crate grpcio;
 extern crate lib;
+extern crate chrono;
 
 use std::sync::Arc;
 
@@ -9,6 +10,10 @@ use lib::protos::kvserver::{ResponseStatus, GetRequest, PutRequest, DeleteReques
 use lib::protos::kvserver_grpc::KvdbClient;
 
 use std::collections::HashMap;
+use std::thread;
+
+use chrono::prelude::*;
+
 pub struct Client {
     pub client: KvdbClient,
 }
@@ -65,31 +70,46 @@ impl Client {
     }
     
 }
-
+const THREAD_NUM: u32 = 1000;
+const PUT_NUM: u32 = 20;  //每个线程的put数量
+const KEY_SIZE: usize = 16;
+const VALUE_SIZE: usize = 4096;
+const TEST_HOST: &'static str = "127.0.0.1";
+const TEST_PORT: u16 = 20001;
+fn getkey(k: i32) ->  String {
+    format!("{:>0width$}", k, width=KEY_SIZE)
+}
+fn getvalue(v: i32) -> String {
+    format!("{:>0width$}", v, width=VALUE_SIZE)
+}
 fn main(){
-    let test_host = String::from("127.0.0.1");
-    let test_port = 20001;
 
-    let client = Client::new(test_host.clone(), test_port);
-    let ret = client.scan("aa".to_string(),"ee".to_string());
-    match ret {
-        Some(v) => println!("scan{{ {:?} }}",v),
-        None => println!("scan None")
+    let mut handles = vec![];
+    let start_time = Local::now();
+
+    for i in 0..THREAD_NUM {
+        let handle = thread::spawn(move || {
+            let client = Client::new(TEST_HOST.clone().to_string(), TEST_PORT);
+            for j in 0..PUT_NUM {
+                let ret = client.put(getkey((i*THREAD_NUM*PUT_NUM + j) as i32), getvalue((i*THREAD_NUM*PUT_NUM + j) as i32));
+                match ret {
+                    true => {}
+                    false => {
+                        println!("{}:{}:put error!", i, j);
+                    }
+                }
+            }
+        });
+        handles.push(handle);
     }
-    client.put("aa".to_string(),"aaaaa".to_string());
-    client.put("bb".to_string(),"bbbbb".to_string());
-    client.put("cc".to_string(),"ccccc".to_string());
-    let ret = client.get("aa".to_string());
-    match ret {
-        Some(v) => println!("get:aa's value:{}", v),
-        None => println!("get None")
+    
+    for handle in handles {
+        handle.join().unwrap();
     }
-    client.delete("aa".to_string());
-    client.put("dd".to_string(),"ccccc".to_string());
-    client.put("dd".to_string(),"ddddd".to_string());
-    let ret = client.scan("aa".to_string(),"ee".to_string());
-    match ret {
-        Some(v) => println!("scan{{ {:?} }}",v),
-        None => println!("scan None")
-    }
+    let end_time = Local::now();
+    let use_time = end_time.timestamp_millis() - start_time.timestamp_millis();
+    println!("use:{}ns , {:.2}s", use_time, (use_time as f64 ) / 1000.0);
+    println!("Thread num:{} , every thread put:{}",THREAD_NUM, PUT_NUM);
+    println!("Key size:{} bytes , Value size:{} bytes",KEY_SIZE, VALUE_SIZE);
+
 }

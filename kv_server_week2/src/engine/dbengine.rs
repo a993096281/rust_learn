@@ -56,7 +56,7 @@ impl DbEngine{
     pub fn scan(&self, key_start: &String, key_end: &String) -> Result<Option<HashMap<String,String>>,()> { // key_start <= key < key_end
         let mut hmap = HashMap::new();
         for (k, v) in self.db.read().unwrap().range(key_start.clone()..key_end.clone()){
-            println!("scan[{}:{}]", k, v);
+            //println!("scan[{}:{}]", k, v);
             hmap.insert(k.clone(),v.clone());
         }
         if hmap.len() != 0 {
@@ -95,8 +95,8 @@ impl DbEngine{
         }
         println!("DbEngine recovering done!");
     }
-    pub fn stop(&mut self) {
+    pub fn flush(&mut self) {
         self.log.write().unwrap().flush();
-        println!("DbEngine stop!");
+        println!("DbEngine flush!");
     }
 }
