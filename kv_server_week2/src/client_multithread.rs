@@ -108,7 +108,7 @@ fn main(){
     }
     let end_time = Local::now();
     let use_time = end_time.timestamp_millis() - start_time.timestamp_millis();
-    println!("use:{}ns , {:.2}s", use_time, (use_time as f64 ) / 1000.0);
+    println!("use:{}ms , {:.2}s", use_time, (use_time as f64 ) / 1000.0);
     println!("Thread num:{} , every thread put:{}",THREAD_NUM, PUT_NUM);
     println!("Key size:{} bytes , Value size:{} bytes",KEY_SIZE, VALUE_SIZE);
 
