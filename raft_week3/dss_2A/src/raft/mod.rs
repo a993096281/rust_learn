@@ -331,7 +331,7 @@ impl Node {
                     my_debug!("id:{} shutdown timeout_thread ", iinode.get_id());
                     break;
                 }
-                if iinode.timeout_true.load(Ordering::Relaxed) == true && iinode.get_votefor() == None { //超时，并且没有投票，需要成为候选者
+                if iinode.timeout_true.load(Ordering::Relaxed) == true { //超时，需要成为候选者
                     let _ret = vote_send.send(1); //发送成为候选者信号
                 }
             }
