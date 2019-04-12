@@ -29,7 +29,7 @@ use std::cmp;
 #[macro_export]
 macro_rules! my_debug {
     ($($arg: tt)*) => (
-        //println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
+        println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
     )
 }
 
@@ -83,7 +83,7 @@ impl LogEntry{
         }
     }
 
-    fn from_data(term: u64, index: u64, src_entry: &Vec<u8>) -> Self{
+    fn from_data(index: u64, term: u64, src_entry: &Vec<u8>) -> Self{
         LogEntry{
             index,
             term,
@@ -205,11 +205,11 @@ impl Raft {
     }
 
     pub fn get_log(&self, index: u64) -> Option<LogEntry> {
-        if self.log.len() - 1 < index {
+        if ((self.log.len() - 1) as u64) < index {
             None
         }
         else {
-            self.log[index].clone()
+            Some(self.log[index as usize].clone())
         }
     }
 
@@ -217,25 +217,60 @@ impl Raft {
         self.commit_index 
     }
 
-    pub fn update_next_and_match(&mut self, new_next_match: Vec<bool>) {
+    pub fn update_next_and_match(&mut self, new_next_match: Vec<i32>) {
+        my_debug!("id:{} new_next_match:{:?}", self.me, new_next_match);
+        let mut match_index = self.match_index.clone().unwrap();
+        let mut next_index = self.next_index.clone().unwrap();
+        my_debug!("id:{} before match_index:{:?}", self.me, match_index);
+        my_debug!("id:{} before next_index:{:?}", self.me, next_index);
         for i in 0..self.get_peers_num() {
-            if i == self.me {
+            if i == self.me as usize {
                 continue;
             }
-            if new_next_match[i] == true {
-
+            if new_next_match[i] == 1 {  //收到success
+                match_index[i] =  next_index[i] - 1;
+                if next_index[i] < self.log.len() as u64 {
+                    next_index[i] += 1;
+                }
             }
-            else {
-                
+            else if new_next_match[i] == 0 {  //收到fail
+                next_index[i] -= 1;
             }
+            //收到error，不变
+        }
+        self.next_index = Some(next_index.clone());
+        self.match_index = Some(match_index.clone());
+        my_debug!("id:{} after match_index:{:?}", self.me, match_index);
+        my_debug!("id:{} after next_index:{:?}", self.me, next_index);
+        //查看是否更新commit
+        let mut new_commit_index: u64 = 0;
+        for index in ((self.commit_index + 1)..(self.log.len() as u64)).rev() { //rev()逆序，从大到小开始检测
+            let mut pass: usize = 0;
+            for i in 0..self.get_peers_num() as usize {
+                if i == self.me as usize {
+                    continue;
+                }
+                if match_index[i] >= index {
+                    pass += 1;
+                }
+            }
+            //my_debug!("id:{} pass:{:?}", self.me, pass);
+            if (pass + 1) > self.get_peers_num()/2 { //说明通过超过半数，可commit
+                new_commit_index = index;
+                break;
+            }
+        }
+        if new_commit_index != 0 {
+            my_debug!("id:{} new_commit_index:{:?}", self.me, new_commit_index);
+            self.set_commit_index(new_commit_index);
         }
     }
 
     pub fn delete_log(&mut self,save_index: u64) { //删除save_index后面的log，save_index不删除
-        if (self.len() - 1) as u64 < save_index {
+        if ((self.log.len() - 1) as u64) < save_index {
             return;
         }
-        let _delete: Vec<LogEntry> = self.log.drain((save_index + 1)..).collect();
+        let _delete: Vec<LogEntry> = self.log.drain((save_index as usize + 1)..).collect();
         for de in &_delete {
             my_debug!("id:{} delete log:[{}:{}]", self.me, de.index, de.term);
         }
@@ -243,7 +278,7 @@ impl Raft {
     }
 
     pub fn push_log(&mut self, index: u64, term: u64, entry: &Vec<u8>) {
-        if self.log.len() != index {
+        if self.log.len() as u64 != index {
             my_debug!("error:id:{} push index:{} error log:[{}:{}]", self.me, self.log.len(), index, term);
             return;
         }
@@ -257,17 +292,19 @@ impl Raft {
             my_debug!("error:id:{} set_commit_index fail:[{}-{}]", self.me, self.commit_index, new_commit_index);
             return;
         }
+        my_debug!("id:{} set commit_index:[{}->{}]", self.me, self.commit_index, new_commit_index);
         self.commit_index = new_commit_index;
-        if self.commit_index > last_applied { //更新状态机
+        if self.commit_index > self.last_applied { //更新状态机
         let last = self.last_applied;
             for i in last..self.commit_index {
                 self.last_applied += 1; //并发送
-                let mesg = struct ApplyMsg {
+                let mesg = ApplyMsg {
                     command_valid: true,
-                    command: self.log[self.last_applied].entry.clone(),
+                    command: self.log[self.last_applied as usize].entry.clone(),
                     command_index: self.last_applied,
-                }
-                let _ret = apply_ch.unbounded_send(mesg);
+                };
+                let _ret = self.apply_ch.unbounded_send(mesg);
+                my_debug!("id:{} apply_ch:[{}]", self.me, self.last_applied);
             }
         }
 
@@ -369,20 +406,19 @@ impl Raft {
         peer.append_entries(&args).map_err(Error::Rpc).wait()
     }
 
-    fn start<M>(&self, command: &M) -> Result<(u64, u64)>
+    fn start<M>(&mut self, command: &M) -> Result<(u64, u64)>
     where
         M: labcodec::Message,
     {
-        let index = 0;
-        let term = 0;
-        let is_leader = true;
-        let mut buf = vec![];
-        labcodec::encode(command, &mut buf).map_err(Error::Encode)?;
-        // Your code here (2B).
-        println!("{:?}", buf);
-        if is_leader {
+        if self.is_leader() {
+            let index = self.log.len() as u64;
+            let term = self.term();
+            let mut buf = vec![];
+            labcodec::encode(command, &mut buf).map_err(Error::Encode)?;
+            self.push_log(index, term, &buf);
             Ok((index, term))
-        } else {
+        }
+        else {
             Err(Error::NotLeader)
         }
     }
@@ -513,6 +549,7 @@ impl Node {
                         let ret = peer.request_vote(&args).map_err(Error::Rpc).wait();
                         match ret {
                             Ok(rep) => {
+                                my_debug!("candidate:{} for vote:{} {:?}!", iinode.get_id(), i, rep);
                                 if rep.vote_granted {
                                     *passed.lock().unwrap() += 1;
                                     my_debug!("candidate:{} for vote:{} passed!", iinode.get_id(), i);
@@ -604,7 +641,13 @@ impl Node {
         }
         let id = inode.get_id();
         let nums = inode.get_peers_num();
-        let results = vec![Arc::new(Mutex::new(false)); nums];  //广播的结果
+        //let results = vec![Arc::new(AtomicI32::new(-1)); nums];  //  错误的写法，这样生成的vec是通过Arc.clone()，再插入,导致只有一个值，查找了好久的bug
+        let mut results: Vec<Arc<AtomicI32>> = vec![];                       //  广播的结果  error:-1, false:0, true:1
+        for _ in 0..nums {
+            results.push(Arc::new(AtomicI32::new(-1)));
+        } 
+        let have_bigger_term = Arc::new(Mutex::new(false));
+        let biggest_term = Arc::new(Mutex::new(0));
         let mut handles = vec![];
         my_debug!("leader:{} heart beat! term:{}", id, inode.term());
         let time = Instant::now();
@@ -612,20 +655,23 @@ impl Node {
         {
             peers = inode.raft.lock().unwrap().get_peers();
         }
-        let mut next_index = inode.get_next_index().unwrap();
+        let next_index = inode.get_next_index().unwrap();
         let (send, recv) = mpsc::channel();
         for i in 0..nums {
             if i == id as usize {
                 continue;
             }
             let iinode = inode.clone();
-            let result = Arc::clone(&results[i]);
-            let args = RequestEntryArgs {
+            let result = results[i].clone();
+            let have_bigger_term_i = Arc::clone(&have_bigger_term);
+            let biggest_term_i = Arc::clone(&biggest_term);
+            let mut args = RequestEntryArgs {
                 term: inode.term(),
                 leader_id: id as u64,
                 prev_log_index: next_index[i] - 1,
                 prev_log_term: 0,
                 entries: vec![], //entries是prev_log_index的下一个
+                entries_term: 0,
                 leader_commit: inode.get_commit_index(),
             };
             let entry = inode.get_log(args.prev_log_index); //一定可得到entry,可unwrap()
@@ -634,6 +680,7 @@ impl Node {
             match entry_next {
                 Some(en) => {
                     args.entries = en.entry.clone();
+                    args.entries_term = en.term;
                 },
                 None => {},
             }
@@ -644,12 +691,18 @@ impl Node {
                 match ret {
                     Ok(rep) => {
                         if rep.success  {
-                            *result.lock().unwrap() = true;
+                            result.store(1, Ordering::Relaxed);
                             my_debug!("leader:{} for heart beat:{} success! ", iinode.get_id(), i);
                         }
                         else {
-                            //*result.lock().unwrap() = false;
-                            my_debug!("leader:{} for heart beat:{} failed! ", iinode.get_id(), i);
+                            result.store(0, Ordering::Relaxed);
+                            if rep.term > iinode.term() {  //发现存在比自己任期大的节点
+                                *have_bigger_term_i.lock().unwrap() = true;
+                                if rep.term > *biggest_term_i.lock().unwrap() {
+                                    *biggest_term_i.lock().unwrap() = rep.term;
+                                }
+                            }
+                            my_debug!("leader:{} for heart beat:{} failed! have_bigger_term:{}", iinode.get_id(), i, *have_bigger_term_i.lock().unwrap());
                         } 
                     },
                     Err(_) => {
@@ -666,30 +719,28 @@ impl Node {
         for j in 0..(nums - 1){
             let _ret = recv.recv_timeout(Duration::from_millis(BROADCAST_ERROR_WAIT_TIME));  //对于一个error的reply，最多等BROADCAST_ERROR_WAIT_TIME毫秒
         }
-        let mut new_next_match: Vec<bool> = vec![false; nums];
-        for j in 0..nums {
-            new_next_match[j] = *results[j].lock().unwrap();
+        if *have_bigger_term.lock().unwrap() == true {  //发现存在比自己任期大的节点
+            my_debug!("leader:[{}:{}] biggest_term:{}", inode.get_id(), inode.term(), *biggest_term.lock().unwrap());
+            if inode.term() < *biggest_term.lock().unwrap() {
+                my_debug!("leader:[{}:{}] set_follow", inode.get_id(), inode.term());
+                inode.set_state(*biggest_term.lock().unwrap(), false, false);
+                inode.set_votefor(None);
+                inode.reset_timeout_thread();
+            }
         }
-        inode.update_next_and_match(new_next_match);
-        for j in 0..nums {  //更新next_index和match_index
-            if j == id as usize {
-                continue;
+        else{
+            let mut new_next_match: Vec<i32> = vec![-1; nums];
+            for j in 0..nums {
+                //my_debug!("leader:[{}] results:{}", inode.get_id(), results[j].load(Ordering::Relaxed));
+                new_next_match[j] = results[j].load(Ordering::Relaxed);
             }
-            if *results[j].lock().unwrap() == true {
-                inode.
-            }
+            inode.update_next_and_match(new_next_match); //更新next_index和match_index
 
         }
+        
         //thread::sleep(Duration::from_millis(5));
         let time2 = time.elapsed().as_millis();
         my_debug!("leader:{} append time:{}ms", inode.get_id(), time2);
-        let passed = *passed.lock().unwrap();
-        if (passed + 1 ) > nums/2  {
-
-        }
-        else{
-            my_debug!("error:leader:{} send_followers_append_entries no pass!", id);
-        }
 
     }
 
@@ -813,7 +864,7 @@ impl Node {
     }
 
     pub fn get_log(&self, index: u64) -> Option<LogEntry> {
-        self.raft.lock().unwrap().get_log()
+        self.raft.lock().unwrap().get_log(index)
     }
 
     pub fn get_commit_index(&self) -> u64 {
@@ -833,6 +884,11 @@ impl Node {
     pub fn set_commit_index(&self, new_commit_index: u64) {
         let mut raft = self.raft.lock().unwrap();
         raft.set_commit_index(new_commit_index);
+    }
+
+    pub fn update_next_and_match(&self, new_next_match: Vec<i32>) {
+        let mut raft = self.raft.lock().unwrap();
+        raft.update_next_and_match(new_next_match);
     }
 
     /// the tester calls kill() when a Raft instance won't
@@ -883,11 +939,17 @@ impl RaftService for Node {
     // example RequestVote RPC handler.
     fn request_vote(&self, args: RequestVoteArgs) -> RpcFuture<RequestVoteReply> {
         // Your code here (2A, 2B).
+        my_debug!("id:{}:{} request_vote begin!", self.get_id(),self.term());
         let mut reply = RequestVoteReply{
             term: self.term(),
             vote_granted: false,
         };
-        if args.term <= self.term() || args.last_log_index < self.get_last_log_index() as u64 || args.last_log_term < self.get_last_log_term() {
+        my_debug!("id:{}:{} {}->{}!", self.get_id(),self.term(), self.get_last_log_term(), args.last_log_term);
+        my_debug!("id:{}:{} {}->{}!", self.get_id(),self.term(), self.get_last_log_index(), args.last_log_index);
+        if args.term <= self.term() || args.last_log_term < self.get_last_log_term() as u64 { //最后的日志的term更小
+            reply.vote_granted = false;
+        }
+        else if args.last_log_term == self.get_last_log_term() && args.last_log_index < self.get_last_log_index() as u64 { //最后的日志的term相同，但是个数更少
             reply.vote_granted = false;
         }
         else {
@@ -896,11 +958,13 @@ impl RaftService for Node {
             self.set_votefor(Some(args.candidate_id));
             self.reset_timeout_thread();
         }
+        my_debug!("id:{} request_vote {} end!", self.get_id(), reply.vote_granted);
         Box::new(futures::future::result(Ok(reply)))
         //unimplemented!()
     }
 
     fn append_entries(&self, args: RequestEntryArgs) -> RpcFuture<RequestEntryReply> {
+        my_debug!("id:{} append_entries begin!", self.get_id());
         let mut reply = RequestEntryReply {
             term: self.term(),
             success: false,
@@ -918,21 +982,21 @@ impl RaftService for Node {
 
                         }
                         else {  //说明args.entries有效，
-                            if self.get_last_log_index() > args.prev_log_index { //说明该节点后面的log需要删除，再添加args.entries
+                            if (self.get_last_log_index() as u64) > args.prev_log_index { //说明该节点后面的log需要删除，再添加args.entries
                                 self.delete_log(args.prev_log_index);
                             }
-                            self.push_log(args.prev_log_index + 1, args.term, &args.entries);
+                            self.push_log(args.prev_log_index + 1, args.entries_term, &args.entries);
                         }
                         //进入这里，说明匹配成功，可以返回success
                         reply.success = true;
                         if args.leader_commit > self.get_commit_index() {  //返回success,可提交commit
-                            let new_commit_index: u64 = cmp::min(args.leader_commit, self.get_last_log_index());
+                            let new_commit_index: u64 = cmp::min(args.leader_commit, self.get_last_log_index() as u64);
                             self.set_commit_index(new_commit_index);
                         }
 
                     }
                     else { //说明false，args.entries无用,并且当前节点的log[args.prev_log_index]有错，等到可以匹配后再一次删后面的所有
-                        my_debug!("error:match fail me[{}:{}-{}:{}] recv [{}:{}-{}:{}]", self.get_id(), self.term(), args.prev_log_index, en.term, args.leader_id, args.term, args.prev_log_index, args.prev_log_term);
+                        my_debug!("error:match fail me[{}:{}-{}:{}] recv [{}:{}-{}:{}]", self.get_id(), self.term(), self.get_last_log_index(), en.term, args.leader_id, args.term, args.prev_log_index, args.prev_log_term);
                     }
 
                 },
@@ -945,6 +1009,7 @@ impl RaftService for Node {
             self.reset_timeout_thread();
 
         }
+        my_debug!("id:{} append_entries end!", self.get_id());
         Box::new(futures::future::result(Ok(reply)))
     }
 }

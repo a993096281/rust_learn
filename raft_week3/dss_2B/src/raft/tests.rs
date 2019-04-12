@@ -84,7 +84,7 @@ fn test_reelection_2a() {
 
     cfg.end();
 }
-
+/*
 #[test]
 fn test_basic_agree_2b() {
     let servers = 5;
@@ -326,7 +326,7 @@ fn test_rejoin_2b() {
 
     cfg.end();
 }
-
+*/
 #[test]
 fn test_backup_2b() {
     let servers = 5;
@@ -405,7 +405,7 @@ fn test_backup_2b() {
 
     cfg.end();
 }
-
+/*
 #[test]
 fn test_count_2b() {
     const SERVERS: usize = 3;
@@ -420,7 +420,8 @@ fn test_count_2b() {
     let mut cfg = Config::new(SERVERS, false);
 
     cfg.begin("Test (2B): RPC counts aren't too high");
-
+    
+    cfg.check_one_leader();
     let mut total1 = rpcs(&cfg);
 
     if total1 > 30 || total1 < 1 {
@@ -532,7 +533,7 @@ fn test_count_2b() {
         );
     }
     cfg.end();
-}
+}*/
 
 #[test]
 fn test_persist1_2c() {
@@ -665,7 +666,7 @@ fn test_persist3_2c() {
 // The leader in a new term may try to finish replicating log entries that
 // haven't been committed yet.
 #[test]
-fn test_figure_82c() {
+fn test_figure_8_2c() {
     let servers = 5;
     let mut cfg = Config::new(servers, false);
 
