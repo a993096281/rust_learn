@@ -84,7 +84,7 @@ fn test_reelection_2a() {
 
     cfg.end();
 }
-/*
+
 #[test]
 fn test_basic_agree_2b() {
     let servers = 5;
@@ -326,7 +326,7 @@ fn test_rejoin_2b() {
 
     cfg.end();
 }
-*/
+
 #[test]
 fn test_backup_2b() {
     let servers = 5;
@@ -405,7 +405,7 @@ fn test_backup_2b() {
 
     cfg.end();
 }
-/*
+
 #[test]
 fn test_count_2b() {
     const SERVERS: usize = 3;
@@ -533,7 +533,7 @@ fn test_count_2b() {
         );
     }
     cfg.end();
-}*/
+}
 
 #[test]
 fn test_persist1_2c() {

@@ -36,6 +36,9 @@ pub struct RequestVoteReply {
 
     #[prost(bool, tag="2")]
     pub vote_granted: bool,
+
+    //#[prost(uint64, tag="3")]
+    //pub last_log_index: u64,     //返回false时，如果有节点有更加新的log，虽然没提交，但是优先那个节点为leader，测试相关    
 }
 
 #[derive(Clone, PartialEq, Message)]

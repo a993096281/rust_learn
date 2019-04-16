@@ -29,14 +29,14 @@ use std::cmp;
 #[macro_export]
 macro_rules! my_debug {
     ($($arg: tt)*) => (
-        println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
+        //println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
     )
 }
 
 const TIMEOUT_LOW_BOUND: u64 = 150;
 const TIMEOUT_HIGH_BOUND: u64 = 200;
-const HEART_BEAT_LOW_BOUND: u64 = 20;
-const HEART_BEAT_HIGH_BOUND: u64 = 25;
+const HEART_BEAT_LOW_BOUND: u64 = 30;
+const HEART_BEAT_HIGH_BOUND: u64 = 35;
 
 const BROADCAST_ERROR_WAIT_TIME: u64 = 2; //广播时接收reply，每个接收最多等待2ms，意味着如果有两个节点error，投票或者心跳接收会等待4ms，
 
@@ -219,6 +219,9 @@ impl Raft {
 
     pub fn update_next_and_match(&mut self, new_next_match: Vec<i32>) {
         my_debug!("id:{} new_next_match:{:?}", self.me, new_next_match);
+        if !self.is_leader() || self.match_index == None || self.next_index == None {
+            return;
+        }
         let mut match_index = self.match_index.clone().unwrap();
         let mut next_index = self.next_index.clone().unwrap();
         my_debug!("id:{} before match_index:{:?}", self.me, match_index);
@@ -487,7 +490,7 @@ impl Node {
                 let rand_sleep = Duration::from_millis(rand::thread_rng().gen_range(TIMEOUT_LOW_BOUND, TIMEOUT_HIGH_BOUND));
                 iinode.timeout_true.store(true, Ordering::Relaxed);
                 thread::park_timeout(rand_sleep);
-                my_debug!("id:{} timeout_thread unpark:{}", iinode.get_id(), iinode.timeout_true.load(Ordering::Relaxed));
+                //my_debug!("id:{} timeout_thread unpark:{}", iinode.get_id(), iinode.timeout_true.load(Ordering::Relaxed));
                 if iinode.shutdown.load(Ordering::Relaxed) == true { //关闭
                     my_debug!("id:{} shutdown timeout_thread ", iinode.get_id());
                     break;
@@ -539,6 +542,7 @@ impl Node {
                     if i == id as usize {
                         continue;
                     }
+                    let leader_id = id;
                     let iinode = inode.clone();
                     let passed = Arc::clone(&passed);
                     let have_better_leader = Arc::clone(&have_better_leader);
@@ -556,11 +560,15 @@ impl Node {
                                 }
                                 else if rep.term > term { //遇到term更大的节点
                                     *have_better_leader.lock().unwrap() = true;
-                                    my_debug!("candidate:{} for vote:{} find have_better_leader!", iinode.get_id(), i);
+                                    my_debug!("candidate:{} for vote:{} find have_better_leader because term!", iinode.get_id(), i);
                                 }
+                                //else if rep.last_log_index > iinode.get_last_log_index() as u64 { //遇到log更新的节点
+                                    //*have_better_leader.lock().unwrap() = true;
+                                    //my_debug!("candidate:{} for vote:{} find have_better_leader because log index!", iinode.get_id(), i);
+                                //}
                             },
                             Err(_) => {
-                                my_debug!("candidate:{} for vote:{} error!", iinode.get_id(), i);
+                                my_debug!("candidate:{} for vote:{} error!", leader_id, i);
                             },
                         }
                         let _ret = tsend.send(1);
@@ -661,6 +669,7 @@ impl Node {
             if i == id as usize {
                 continue;
             }
+            let leader_id = id;
             let iinode = inode.clone();
             let result = results[i].clone();
             let have_bigger_term_i = Arc::clone(&have_bigger_term);
@@ -706,7 +715,7 @@ impl Node {
                         } 
                     },
                     Err(_) => {
-                        my_debug!("leader:{} for heart beat:{} error! ", iinode.get_id(), i);
+                        my_debug!("leader:{} for heart beat:{} error! ", leader_id, i);
                     },
                 }
                 let _ret = tsend.send(1);
@@ -729,6 +738,7 @@ impl Node {
             }
         }
         else{
+            //let mut raft = inode.raft.lock().unwrap(); //为了保证原子性
             let mut new_next_match: Vec<i32> = vec![-1; nums];
             for j in 0..nums {
                 //my_debug!("leader:[{}] results:{}", inode.get_id(), results[j].load(Ordering::Relaxed));
@@ -939,32 +949,43 @@ impl RaftService for Node {
     // example RequestVote RPC handler.
     fn request_vote(&self, args: RequestVoteArgs) -> RpcFuture<RequestVoteReply> {
         // Your code here (2A, 2B).
-        my_debug!("id:{}:{} request_vote begin!", self.get_id(),self.term());
+        //my_debug!("id:{}:{} request_vote begin {:?}!", self.get_id(),self.term(), args);
         let mut reply = RequestVoteReply{
             term: self.term(),
             vote_granted: false,
+            //last_log_index: 0,
         };
-        my_debug!("id:{}:{} {}->{}!", self.get_id(),self.term(), self.get_last_log_term(), args.last_log_term);
-        my_debug!("id:{}:{} {}->{}!", self.get_id(),self.term(), self.get_last_log_index(), args.last_log_index);
-        if args.term <= self.term() || args.last_log_term < self.get_last_log_term() as u64 { //最后的日志的term更小
-            reply.vote_granted = false;
-        }
-        else if args.last_log_term == self.get_last_log_term() && args.last_log_index < self.get_last_log_index() as u64 { //最后的日志的term相同，但是个数更少
+        //my_debug!("id:{}:{} {}->{}!", self.get_id(),self.term(), self.get_last_log_term(), args.last_log_term);
+        //my_debug!("id:{}:{} {}->{}!", self.get_id(),self.term(), self.get_last_log_index(), args.last_log_index);
+        if args.term <= self.term() { //term更小
             reply.vote_granted = false;
         }
         else {
-            reply.vote_granted = true;
+            //self.set_state(args.term, false, false);   //这里的term一定遇到更大的term，所以更新term
+            if args.last_log_term < self.get_last_log_term() as u64 {  //最后的日志的term更小
+                reply.vote_granted = false;
+            }
+            else if args.last_log_term == self.get_last_log_term() && args.last_log_index < self.get_last_log_index() as u64 { //最后的日志的term相同，但是个数更少
+                reply.vote_granted = false;
+                //reply.last_log_index = self.get_last_log_index() as u64;
+            }
+            else {
+                reply.vote_granted = true;
+                //self.set_state(args.term, false, false);
+                self.set_votefor(Some(args.candidate_id));
+                //self.reset_timeout_thread();
+            }
             self.set_state(args.term, false, false);
-            self.set_votefor(Some(args.candidate_id));
             self.reset_timeout_thread();
+
         }
-        my_debug!("id:{} request_vote {} end!", self.get_id(), reply.vote_granted);
+        //my_debug!("id:{} request_vote {} end {:?}! ", self.get_id(), reply.vote_granted, reply);
         Box::new(futures::future::result(Ok(reply)))
         //unimplemented!()
     }
 
     fn append_entries(&self, args: RequestEntryArgs) -> RpcFuture<RequestEntryReply> {
-        my_debug!("id:{} append_entries begin!", self.get_id());
+        //my_debug!("id:{} append_entries begin {:?}!", self.get_id(),args);
         let mut reply = RequestEntryReply {
             term: self.term(),
             success: false,
@@ -1009,7 +1030,7 @@ impl RaftService for Node {
             self.reset_timeout_thread();
 
         }
-        my_debug!("id:{} append_entries end!", self.get_id());
+        //my_debug!("id:{} append_entries end {:?}!", self.get_id(), reply);
         Box::new(futures::future::result(Ok(reply)))
     }
 }
