@@ -25,11 +25,12 @@ use std::thread;
 use std::time::{Instant, Duration};
 use rand::Rng;
 use std::cmp;
+use self::config::Entry;
 
 #[macro_export]
 macro_rules! my_debug {
     ($($arg: tt)*) => (
-        //println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
+        println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
     )
 }
 
@@ -38,7 +39,7 @@ const TIMEOUT_HIGH_BOUND: u64 = 200;
 const HEART_BEAT_LOW_BOUND: u64 = 30;
 const HEART_BEAT_HIGH_BOUND: u64 = 35;
 
-const BROADCAST_ERROR_WAIT_TIME: u64 = 2; //广播时接收reply，每个接收最多等待2ms，意味着如果有两个节点error，投票或者心跳接收会等待4ms，
+const BROADCAST_ERROR_WAIT_TIME: u64 = 10; //广播时接收reply，每个接收最多等待time ms，意味着如果有两个节点error，投票或者心跳接收会等待2*time ms，
 
 pub struct ApplyMsg {
     pub command_valid: bool,
@@ -47,15 +48,27 @@ pub struct ApplyMsg {
 }
 
 /// State of a raft peer.
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, PartialEq, Message)]
 pub struct State {
+    #[prost(uint64, tag="1")]
     pub term: u64,
+
+    #[prost(bool, tag="2")]
     pub is_leader: bool,
+
+    #[prost(bool, tag="3")]
     pub is_candidate: bool,
 }
 
 impl State {
     /// The current term of this peer.
+    fn new() -> Self{
+        State{
+            term: 0,
+            is_leader: false,
+            is_candidate: false,
+        }
+    }
     pub fn term(&self) -> u64 {
         self.term
     }
@@ -67,10 +80,15 @@ impl State {
         self.is_candidate
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Message)]
 pub struct LogEntry{
+    #[prost(uint64, tag="1")]
     pub index: u64,   //主要做检验，理论上以Vec的下标为主
+
+    #[prost(uint64, tag="2")]
     pub term: u64,
+
+    #[prost(bytes, tag="3")]
     pub entry: Vec<u8>,
 }
 
@@ -91,6 +109,39 @@ impl LogEntry{
         }
     }
 }
+//保持所有状态
+#[derive(Clone, PartialEq, Message)]
+pub struct RaftState {   //voted_for暂时觉得没必要保存
+    #[prost(uint64, tag="1")]
+    pub term: u64,
+
+    #[prost(bool, tag="2")]
+    pub is_leader: bool,
+
+    #[prost(bool, tag="3")]
+    pub is_candidate: bool,
+
+    #[prost(uint64, tag="4")]
+    pub commit_index: u64,
+
+    #[prost(uint64, tag="5")]
+    pub last_applied: u64,
+
+    #[prost(bytes, repeated, tag="6")]
+    pub logs: Vec<Vec<u8>>,
+}
+impl RaftState {
+    fn new() -> Self{
+        RaftState{
+            term: 0,
+            is_leader: false,
+            is_candidate: false,
+            commit_index: 0,
+            last_applied: 0,
+            logs: vec![],
+        }
+    }
+}
 
 // A single Raft peer.
 pub struct Raft {
@@ -100,7 +151,7 @@ pub struct Raft {
     persister: Box<dyn Persister>,
     // this peer's index into peers[]
     me: u64,
-    state: Arc<State>,
+    state: State,
     apply_ch: UnboundedSender<ApplyMsg>,
     voted_for: Option<u64>,
     log: Vec<LogEntry>,         //日志条目，1开始，并且Vec下标为索引
@@ -136,7 +187,7 @@ impl Raft {
             peers,
             persister,
             me: me as u64,
-            state: Arc::default(),
+            state: State::new(),
             apply_ch,
             voted_for: None,
             log: vec![LogEntry::new()],
@@ -176,7 +227,7 @@ impl Raft {
             is_leader,
             is_candidate,
         };
-        self.state = Arc::new(leader);
+        self.state = leader;
         my_debug!("set id:{} term:{} islead:{} iscondi:{}", self.me, self.state.term(), self.state.is_leader(), self.state.is_candidate());
         if self.state.is_leader() {
             self.next_index = Some(vec![ self.log.len() as u64 ; self.peers.len()]);
@@ -186,6 +237,7 @@ impl Raft {
             self.next_index = None;
             self.match_index = None;
         }
+        self.persist();
     }
 
     pub fn get_peers_num(&self) -> usize {
@@ -274,6 +326,7 @@ impl Raft {
             return;
         }
         let _delete: Vec<LogEntry> = self.log.drain((save_index as usize + 1)..).collect();
+        self.persist();
         for de in &_delete {
             my_debug!("id:{} delete log:[{}:{}]", self.me, de.index, de.term);
         }
@@ -286,12 +339,20 @@ impl Raft {
             return;
         }
         self.log.push(LogEntry::from_data(index, term, entry));
-        my_debug!("id:{} push log:[{}:{}]", self.me, index, term);
+        self.persist(); 
+        let mut _entr: Option<Entry> = None;
+        match labcodec::decode(&entry) {
+            Ok(en) => {
+                _entr = Some(en);
+            },
+            Err(e) => {},
+        }
+        my_debug!("id:{} push log:[{}:{}:{:?}] ", self.me, index, term, _entr.unwrap());
 
     }
 
     pub fn set_commit_index(&mut self, new_commit_index: u64) {
-        if new_commit_index <= self.commit_index {
+        if new_commit_index < self.commit_index {
             my_debug!("error:id:{} set_commit_index fail:[{}-{}]", self.me, self.commit_index, new_commit_index);
             return;
         }
@@ -308,6 +369,7 @@ impl Raft {
                 };
                 let _ret = self.apply_ch.unbounded_send(mesg);
                 my_debug!("id:{} apply_ch:[{}]", self.me, self.last_applied);
+                self.persist();
             }
         }
 
@@ -322,10 +384,28 @@ impl Raft {
         // labcodec::encode(&self.xxx, &mut data).unwrap();
         // labcodec::encode(&self.yyy, &mut data).unwrap();
         // self.persister.save_raft_state(data);
+        let mut data = vec![];
+        let mut raft_state = RaftState {
+            term: self.term(),
+            is_leader: self.is_leader(),
+            is_candidate: self.is_candidate(),
+            commit_index: self.commit_index,
+            last_applied: self.last_applied,
+            logs: vec![],
+        };
+        for i in 1..self.log.len() { //从1开始，不保存index为0的空log
+            let mut dat = vec![];
+            let log = self.log[i].clone();
+            let _ret = labcodec::encode(&log, &mut dat).map_err(Error::Encode);
+            raft_state.logs.push(dat);
+        }
+        let _ret = labcodec::encode(&raft_state, &mut data).map_err(Error::Encode);
+        self.persister.save_raft_state(data);
     }
 
     /// restore previously persisted state.
     fn restore(&mut self, data: &[u8]) {
+        //println!("state:{:?}", data);
         if data.is_empty() {
             // bootstrap without any state?
             return;
@@ -341,6 +421,41 @@ impl Raft {
         //         panic!("{:?}", e);
         //     }
         // }
+        match labcodec::decode(data) {
+            Ok(state) => {
+                let state: RaftState = state;
+                let restate = State {
+                    term: state.term,
+                    is_leader: false,
+                    is_candidate: false,
+                };
+
+                self.state = restate;
+                self.commit_index = state.commit_index;
+                self.last_applied = state.last_applied;
+
+                my_debug!("id:{} restore state:{:?}", self.me, state);
+                my_debug!("num:{}", state.logs.len());
+                for i in 0..state.logs.len() {
+                    let log_encode = state.logs[i].clone();
+                     match labcodec::decode(&log_encode) {
+                        Ok(log) => {
+                            let log: LogEntry = log;
+                            self.log.push(log.clone());
+                            my_debug!("id:{} restore log :{:?}", self.me, log);
+                        },
+                        Err(e) => {
+                            panic!("{:?}", e);
+                        },
+                     }
+                }
+                //my_debug!("id:{} restore set state:{:?}", self.me, self.state);
+
+            },
+            Err(e) => {
+                panic!("{:?}", e);
+            },
+        }
     }
 
     /// example code to send a RequestVote RPC to a server.
@@ -621,7 +736,7 @@ impl Node {
     pub fn creat_append_thread(inode: Node) {
         let iinode = inode.clone();
         let athread = thread::spawn(move || {
-            my_debug!("creat_vote_thread:{:p}", &iinode);
+            my_debug!("creat_append_thread:{:p}", &iinode);
             loop {
                 match iinode.is_leader() {
                     true => {},
@@ -650,9 +765,9 @@ impl Node {
         let id = inode.get_id();
         let nums = inode.get_peers_num();
         //let results = vec![Arc::new(AtomicI32::new(-1)); nums];  //  错误的写法，这样生成的vec是通过Arc.clone()，再插入,导致只有一个值，查找了好久的bug
-        let mut results: Vec<Arc<AtomicI32>> = vec![];                       //  广播的结果  error:-1, false:0, true:1
+        let mut results: Vec<Arc<Mutex<i32>>> = vec![];                       //  广播的结果  error:-1, false:0, true:1
         for _ in 0..nums {
-            results.push(Arc::new(AtomicI32::new(-1)));
+            results.push(Arc::new(Mutex::new(-1)));
         } 
         let have_bigger_term = Arc::new(Mutex::new(false));
         let biggest_term = Arc::new(Mutex::new(0));
@@ -664,6 +779,7 @@ impl Node {
             peers = inode.raft.lock().unwrap().get_peers();
         }
         let next_index = inode.get_next_index().unwrap();
+        my_debug!("leader:{} next_index:{:?}", id, next_index);
         let (send, recv) = mpsc::channel();
         for i in 0..nums {
             if i == id as usize {
@@ -700,11 +816,11 @@ impl Node {
                 match ret {
                     Ok(rep) => {
                         if rep.success  {
-                            result.store(1, Ordering::Relaxed);
+                            *result.lock().unwrap() = 1;
                             my_debug!("leader:{} for heart beat:{} success! ", iinode.get_id(), i);
                         }
                         else {
-                            result.store(0, Ordering::Relaxed);
+                            *result.lock().unwrap() = 0;
                             if rep.term > iinode.term() {  //发现存在比自己任期大的节点
                                 *have_bigger_term_i.lock().unwrap() = true;
                                 if rep.term > *biggest_term_i.lock().unwrap() {
@@ -727,6 +843,7 @@ impl Node {
         }*/
         for j in 0..(nums - 1){
             let _ret = recv.recv_timeout(Duration::from_millis(BROADCAST_ERROR_WAIT_TIME));  //对于一个error的reply，最多等BROADCAST_ERROR_WAIT_TIME毫秒
+            //let _ret = recv.recv();
         }
         if *have_bigger_term.lock().unwrap() == true {  //发现存在比自己任期大的节点
             my_debug!("leader:[{}:{}] biggest_term:{}", inode.get_id(), inode.term(), *biggest_term.lock().unwrap());
@@ -742,7 +859,7 @@ impl Node {
             let mut new_next_match: Vec<i32> = vec![-1; nums];
             for j in 0..nums {
                 //my_debug!("leader:[{}] results:{}", inode.get_id(), results[j].load(Ordering::Relaxed));
-                new_next_match[j] = results[j].load(Ordering::Relaxed);
+                new_next_match[j] = *results[j].lock().unwrap();
             }
             inode.update_next_and_match(new_next_match); //更新next_index和match_index
 
@@ -985,7 +1102,7 @@ impl RaftService for Node {
     }
 
     fn append_entries(&self, args: RequestEntryArgs) -> RpcFuture<RequestEntryReply> {
-        //my_debug!("id:{} append_entries begin {:?}!", self.get_id(),args);
+        my_debug!("id:{} append_entries begin {:?}!", self.get_id(),args);
         let mut reply = RequestEntryReply {
             term: self.term(),
             success: false,
@@ -1030,7 +1147,7 @@ impl RaftService for Node {
             self.reset_timeout_thread();
 
         }
-        //my_debug!("id:{} append_entries end {:?}!", self.get_id(), reply);
+        my_debug!("id:{} append_entries end {:?}!", self.get_id(), reply);
         Box::new(futures::future::result(Ok(reply)))
     }
 }

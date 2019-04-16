@@ -1,8 +1,9 @@
 #![allow(clippy::identity_op)]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Sender};
-use std::sync::{Arc, Mutex};
+//use std::sync::atomic::{AtomicUsize, Ordering};
+//use std::sync::mpsc::{channel, Sender};
+//use std::sync::{Arc, Mutex};
+//use std::sync::{Arc};
 use std::thread;
 use std::time::Duration;
 
@@ -10,8 +11,9 @@ use futures::sync::oneshot;
 use futures::{future, Future};
 use rand::{Rng, ThreadRng};
 
-use crate::raft::config::{Config, Entry, Storage};
-use crate::raft::Node;
+use crate::raft::config::{Config, Entry};
+//use crate::raft::config::{Config, Entry, Storage};
+//use crate::raft::Node;
 
 /// The tester generously allows solutions to complete elections in one second
 /// (much more than the paper's range of timeouts).
@@ -534,7 +536,7 @@ fn test_count_2b() {
     }
     cfg.end();
 }
-
+/*
 #[test]
 fn test_persist1_2c() {
     let servers = 3;
@@ -761,7 +763,7 @@ fn test_unreliable_agree_2c() {
     cfg.one(Entry { x: 100 }, servers, true);
 
     cfg.end();
-}
+}*/
 
 #[test]
 fn test_figure_8_unreliable_2c() {
@@ -838,7 +840,7 @@ fn test_figure_8_unreliable_2c() {
 
     cfg.end();
 }
-
+/*
 fn internal_churn(unreliable: bool) {
     let servers = 5;
     let mut cfg = Config::new(servers, unreliable);
@@ -1000,3 +1002,4 @@ fn test_reliable_churn_2c() {
 fn test_unreliable_churn_2c() {
     internal_churn(true);
 }
+*/
