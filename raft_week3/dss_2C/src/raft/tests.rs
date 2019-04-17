@@ -667,6 +667,7 @@ fn test_persist3_2c() {
 // alive servers isn't enough to form a majority, perhaps start a new server.
 // The leader in a new term may try to finish replicating log entries that
 // haven't been committed yet.
+
 #[test]
 fn test_figure_8_2c() {
     let servers = 5;
@@ -763,8 +764,8 @@ fn test_unreliable_agree_2c() {
     cfg.one(Entry { x: 100 }, servers, true);
 
     cfg.end();
-}*/
-
+}
+*/
 #[test]
 fn test_figure_8_unreliable_2c() {
     let servers = 5;
@@ -802,6 +803,7 @@ fn test_figure_8_unreliable_2c() {
 
         if (random.gen::<usize>() % 1000) < 100 {
             let ms = random.gen::<u64>() % (RAFT_ELECTION_TIMEOUT.as_millis() as u64 / 2);
+            println!("sleep ms:{}", ms);
             thread::sleep(Duration::from_millis(ms as u64));
         } else {
             let ms = random.gen::<u64>() % 13;
@@ -811,6 +813,7 @@ fn test_figure_8_unreliable_2c() {
         if let Some(leader) = leader {
             if (random.gen::<usize>() % 1000) < (RAFT_ELECTION_TIMEOUT.as_millis() as usize) / 2 {
                 cfg.disconnect(leader);
+                println!("disconnect:{}", leader);
                 nup -= 1;
             }
         }
@@ -819,6 +822,7 @@ fn test_figure_8_unreliable_2c() {
             let s = random.gen::<usize>() % servers;
             if !cfg.connected[s] {
                 cfg.connect(s);
+                println!("connect:{}", s);
                 nup += 1;
             }
         }
@@ -827,6 +831,7 @@ fn test_figure_8_unreliable_2c() {
     for i in 0..servers {
         if !cfg.connected[i] {
             cfg.connect(i);
+            println!("connect:{}", i);
         }
     }
 
@@ -1001,5 +1006,4 @@ fn test_reliable_churn_2c() {
 #[test]
 fn test_unreliable_churn_2c() {
     internal_churn(true);
-}
-*/
+}*/

@@ -35,11 +35,13 @@ macro_rules! my_debug {
 }
 
 const TIMEOUT_LOW_BOUND: u64 = 150;
-const TIMEOUT_HIGH_BOUND: u64 = 200;
-const HEART_BEAT_LOW_BOUND: u64 = 30;
-const HEART_BEAT_HIGH_BOUND: u64 = 35;
+const TIMEOUT_HIGH_BOUND: u64 = 300;
+const HEART_BEAT_LOW_BOUND: u64 = 95;
+const HEART_BEAT_HIGH_BOUND: u64 = 100;
 
-const BROADCAST_ERROR_WAIT_TIME: u64 = 10; //广播时接收reply，每个接收最多等待time ms，意味着如果有两个节点error，投票或者心跳接收会等待2*time ms，
+
+//const BROADCAST_ERROR_WAIT_TIME: u64 = 10; //广播时接收reply，每个接收最多等待time ms，意味着如果有两个节点error，投票或者心跳接收会等待2*time ms，
+const MAX_SEND_ENTRIES: u64 = 1000;  //一次最大可发送的entries
 
 pub struct ApplyMsg {
     pub command_valid: bool,
@@ -230,8 +232,12 @@ impl Raft {
         self.state = leader;
         my_debug!("set id:{} term:{} islead:{} iscondi:{}", self.me, self.state.term(), self.state.is_leader(), self.state.is_candidate());
         if self.state.is_leader() {
-            self.next_index = Some(vec![ self.log.len() as u64 ; self.peers.len()]);
+            self.next_index = Some(vec![ self.commit_index + 1 ; self.peers.len()]);
             self.match_index = Some(vec![ 0; self.peers.len()]);
+        }
+        else if self.is_candidate() {
+            self.next_index = None;
+            self.match_index = None;
         }
         else {
             self.next_index = None;
@@ -321,6 +327,67 @@ impl Raft {
         }
     }
 
+    pub fn handle_append_reply(&mut self, id: u64, result: i32, for_next_index: u64) {  //1:sucess 0:fail -1:error
+        if !self.is_leader() || self.match_index == None || self.next_index == None {
+            return;
+        }
+        my_debug!("leader:{} handle_append_reply id:{} result:{} for_next_index:{}", self.me, id, result, for_next_index);
+        if for_next_index < 1 || for_next_index > self.log.len() as u64 {
+            return;
+        }
+        let mut match_index = self.match_index.clone().unwrap();
+        let mut next_index = self.next_index.clone().unwrap();
+        my_debug!("id:{} before match_index:{:?}", self.me, match_index);
+        my_debug!("id:{} before next_index:{:?}", self.me, next_index);
+        let id = id as usize;
+        if result == 1 {  //收到success
+            match_index[id] =  for_next_index - 1;
+            next_index[id] = for_next_index;
+        }
+        else if result == 0 {  //收到fail
+            if next_index[id] < (MAX_SEND_ENTRIES + 1) {
+                next_index[id] = 1;
+            }
+            else {
+                next_index[id] -= MAX_SEND_ENTRIES;
+            }
+        }
+        //收到error，不变
+        self.next_index = Some(next_index.clone());
+        self.match_index = Some(match_index.clone());
+        my_debug!("id:{} after match_index:{:?}", self.me, match_index);
+        my_debug!("id:{} after next_index:{:?}", self.me, next_index);
+        if result == 0 || result == -1 {
+            return;
+        } 
+        //查看是否更新commit
+        let mut new_commit_index: u64 = 0;
+        for index in ((self.commit_index + 1)..(match_index[id] + 1)).rev() { //rev()逆序，从大到小开始检测
+            let mut pass: usize = 0;
+            for i in 0..self.get_peers_num() as usize {
+                if i == self.me as usize {
+                    continue;
+                }
+                if match_index[i] >= index {
+                    pass += 1;
+                }
+            }
+            if (pass + 1) > self.get_peers_num()/2 { //说明通过超过半数，可commit
+                new_commit_index = index;
+                break;
+            }
+        }
+        if new_commit_index != 0 {
+            let log = self.get_log(new_commit_index).unwrap();
+            if log.term != self.term() {
+                return;
+            }
+            my_debug!("id:{} new_commit_index:{:?}", self.me, new_commit_index);
+            self.set_commit_index(new_commit_index);
+        }
+
+    }
+
     pub fn delete_log(&mut self,save_index: u64) { //删除save_index后面的log，save_index不删除
         if ((self.log.len() - 1) as u64) < save_index {
             return;
@@ -328,7 +395,15 @@ impl Raft {
         let _delete: Vec<LogEntry> = self.log.drain((save_index as usize + 1)..).collect();
         self.persist();
         for de in &_delete {
-            my_debug!("id:{} delete log:[{}:{}]", self.me, de.index, de.term);
+            let entry = de.entry.clone();
+            let mut _entr: Option<Entry> = None;
+            match labcodec::decode(&entry) {
+                Ok(en) => {
+                    _entr = Some(en);
+                },
+                Err(e) => {},
+            }
+            my_debug!("id:{} delete log:[{}:{}:{:?}]", self.me, de.index, de.term,_entr);
         }
 
     }
@@ -634,7 +709,6 @@ impl Node {
                 let mut term = inode.term();
                 term += 1;
                 inode.set_state(term, false, true);
-                my_debug!("candidate:{} term:{}", inode.get_id(),inode.term());
                 let id = inode.get_id();
                 let args = RequestVoteArgs {
                     term,
@@ -642,40 +716,58 @@ impl Node {
                     last_log_index: inode.get_last_log_index() as u64,
                     last_log_term: inode.get_last_log_term(),
                 };
-
-                let passed = Arc::new(Mutex::new(0));
+                my_debug!("candidate:{} term:{} commit:{} args:{:?}", inode.get_id(),inode.term(), inode.get_commit_index(), args);
+                let passed = Arc::new(Mutex::new(1));  //先给自己投一票
                 let have_better_leader = Arc::new(Mutex::new(false)); //存在term更大的节点
-                let mut handles = vec![];
+                //let mut handles = vec![];
                 let nums = inode.get_peers_num();
-                let time = Instant::now();
                 let peers;
                 {
                     peers = inode.raft.lock().unwrap().get_peers();
                 }
-                let (send, recv) = mpsc::channel();
+                //let (send, recv) = mpsc::channel();
                 for i in 0..nums {
                     if i == id as usize {
                         continue;
                     }
+                    let time = Instant::now();
                     let leader_id = id;
+                    let nums = nums as u64;
                     let iinode = inode.clone();
                     let passed = Arc::clone(&passed);
                     let have_better_leader = Arc::clone(&have_better_leader);
                     let args = args.clone();
                     let peer = peers[i].clone();
-                    let tsend = mpsc::Sender::clone(&send);
-                    let handle = thread::spawn(move || {
+                    let term = term;
+                    //let tsend = mpsc::Sender::clone(&send);
+                    thread::spawn(move || {
                         let ret = peer.request_vote(&args).map_err(Error::Rpc).wait();
                         match ret {
                             Ok(rep) => {
-                                my_debug!("candidate:{} for vote:{} {:?}!", iinode.get_id(), i, rep);
+                                //let mut raft = iinode.raft.lock().unwrap();  //原子操作
                                 if rep.vote_granted {
                                     *passed.lock().unwrap() += 1;
-                                    my_debug!("candidate:{} for vote:{} passed!", iinode.get_id(), i);
+                                    let time2 = time.elapsed().as_millis();
+                                    my_debug!("candidate:{} for vote:{} passed time:{}!", leader_id, i, time2);
+                                    if *passed.lock().unwrap() > nums/2 && iinode.is_candidate() && term == iinode.term() {  //投票成功，并仍是候选者状态
+                                            iinode.set_state(term, true, false); //成为leared
+                                            //广播心跳
+                                            my_debug!("{} become leader!", iinode.get_id());
+                                            Node::send_followers_append_entries(iinode.clone());
+                                            iinode.reset_append_thread();
+                                            iinode.reset_timeout_thread();
+                                    }
+                                    //*passed.lock().unwrap() += 1;
+                                    //my_debug!("candidate:{} for vote:{} passed!", leader_id, i);
                                 }
-                                else if rep.term > term { //遇到term更大的节点
-                                    *have_better_leader.lock().unwrap() = true;
-                                    my_debug!("candidate:{} for vote:{} find have_better_leader because term!", iinode.get_id(), i);
+                                else if rep.term > iinode.term() { //遇到term更大节点
+                                    iinode.set_state(rep.term, false, false);
+                                    iinode.set_votefor(None);
+                                    iinode.reset_timeout_thread();
+                                    //*have_better_leader.lock().unwrap() = true;
+                                    let time2 = time.elapsed().as_millis();
+                                    my_debug!("candidate:{} for vote:{} fail time:{}ms find have_better_leader because term!", leader_id, i, time2);
+
                                 }
                                 //else if rep.last_log_index > iinode.get_last_log_index() as u64 { //遇到log更新的节点
                                     //*have_better_leader.lock().unwrap() = true;
@@ -683,17 +775,18 @@ impl Node {
                                 //}
                             },
                             Err(_) => {
-                                my_debug!("candidate:{} for vote:{} error!", leader_id, i);
+                                //let time2 = time.elapsed().as_millis();
+                                //my_debug!("candidate:{} for vote:{} error time:{}ms!", leader_id, i, time2);
                             },
                         }
-                        let _ret = tsend.send(1);
+                        //let _ret = tsend.send(1);
                     });
-                    handles.push(handle);
+                    //handles.push(handle);
                 }
                 /*for handle in handles {
                     handle.join().unwrap();
                 }*/
-                for j in 0..(nums - 1){
+                /*for j in 0..(nums - 1){
                     let _ret = recv.recv_timeout(Duration::from_millis(BROADCAST_ERROR_WAIT_TIME));
                     if *have_better_leader.lock().unwrap() == true || (*passed.lock().unwrap() + 1 ) > nums/2 {
                         break;
@@ -712,7 +805,7 @@ impl Node {
                         inode.reset_append_thread();
                         inode.reset_timeout_thread();
                     }
-                }
+                }*/
             
             }
 
@@ -765,83 +858,99 @@ impl Node {
         let id = inode.get_id();
         let nums = inode.get_peers_num();
         //let results = vec![Arc::new(AtomicI32::new(-1)); nums];  //  错误的写法，这样生成的vec是通过Arc.clone()，再插入,导致只有一个值，查找了好久的bug
-        let mut results: Vec<Arc<Mutex<i32>>> = vec![];                       //  广播的结果  error:-1, false:0, true:1
+        /*let mut results: Vec<Arc<Mutex<i32>>> = vec![];                       //  广播的结果  error:-1, false:0, true:1
         for _ in 0..nums {
             results.push(Arc::new(Mutex::new(-1)));
-        } 
-        let have_bigger_term = Arc::new(Mutex::new(false));
-        let biggest_term = Arc::new(Mutex::new(0));
-        let mut handles = vec![];
+        } */
+        //let have_bigger_term = Arc::new(Mutex::new(false));
+        //let biggest_term = Arc::new(Mutex::new(0));
+        //let mut handles = vec![];
         my_debug!("leader:{} heart beat! term:{}", id, inode.term());
-        let time = Instant::now();
+        //let time = Instant::now();
         let peers;
         {
             peers = inode.raft.lock().unwrap().get_peers();
         }
-        let next_index = inode.get_next_index().unwrap();
+        let next_index = match inode.get_next_index() {
+            Some(index) => index ,
+            None => { return; },
+        };
         my_debug!("leader:{} next_index:{:?}", id, next_index);
-        let (send, recv) = mpsc::channel();
+        //let (send, recv) = mpsc::channel();
         for i in 0..nums {
             if i == id as usize {
                 continue;
             }
             let leader_id = id;
             let iinode = inode.clone();
-            let result = results[i].clone();
-            let have_bigger_term_i = Arc::clone(&have_bigger_term);
-            let biggest_term_i = Arc::clone(&biggest_term);
+            let time = Instant::now();
+            //let result = results[i].clone();
+            //let have_bigger_term_i = Arc::clone(&have_bigger_term);
+            //let biggest_term_i = Arc::clone(&biggest_term);
             let mut args = RequestEntryArgs {
                 term: inode.term(),
                 leader_id: id as u64,
                 prev_log_index: next_index[i] - 1,
                 prev_log_term: 0,
                 entries: vec![], //entries是prev_log_index的下一个
-                entries_term: 0,
                 leader_commit: inode.get_commit_index(),
             };
             let entry = inode.get_log(args.prev_log_index); //一定可得到entry,可unwrap()
             args.prev_log_term = entry.unwrap().term;  
-            let entry_next = inode.get_log(next_index[i]);
-            match entry_next {
-                Some(en) => {
-                    args.entries = en.entry.clone();
-                    args.entries_term = en.term;
-                },
-                None => {},
+            for j in 0..MAX_SEND_ENTRIES {
+                let entry_next = inode.get_log(next_index[i] + j);
+                match entry_next {
+                    Some(en) => {
+                        let mut dat = vec![];
+                        let _ret = labcodec::encode(&en, &mut dat).map_err(Error::Encode);
+                        args.entries.push(dat);
+                    },
+                    None => {
+                        break;
+                    },
+                }
             }
             let peer = peers[i].clone();
-            let tsend = mpsc::Sender::clone(&send);
-            let handle = thread::spawn(move || {
+            //let tsend = mpsc::Sender::clone(&send);
+            thread::spawn(move || {
+                my_debug!("leader:{} do heart beat:{} args:{:?}! ", leader_id, i, args);
                 let ret = peer.append_entries(&args).map_err(Error::Rpc).wait();
                 match ret {
                     Ok(rep) => {
                         if rep.success  {
-                            *result.lock().unwrap() = 1;
-                            my_debug!("leader:{} for heart beat:{} success! ", iinode.get_id(), i);
+                            //*result.lock().unwrap() = 1;
+                            iinode.handle_append_reply(i as u64, 1, rep.next_index);
+                            let time2 = time.elapsed().as_millis();
+                            my_debug!("leader:{} do heart beat:{} success time:{}ms! ", leader_id, i, time2);
                         }
                         else {
-                            *result.lock().unwrap() = 0;
+                            //*result.lock().unwrap() = 0;
                             if rep.term > iinode.term() {  //发现存在比自己任期大的节点
-                                *have_bigger_term_i.lock().unwrap() = true;
-                                if rep.term > *biggest_term_i.lock().unwrap() {
-                                    *biggest_term_i.lock().unwrap() = rep.term;
-                                }
+                                my_debug!("leader:[{}:{}] set_follow because id:{} bigger term:{}", leader_id, iinode.term(), i, rep.term);
+                                iinode.set_state(rep.term, false, false);
+                                iinode.set_votefor(None);
+                                iinode.reset_timeout_thread();
                             }
-                            my_debug!("leader:{} for heart beat:{} failed! have_bigger_term:{}", iinode.get_id(), i, *have_bigger_term_i.lock().unwrap());
+                            else {
+                                iinode.handle_append_reply(i as u64, 0, rep.next_index);
+                            }
+                            let time2 = time.elapsed().as_millis();
+                            my_debug!("leader:{} do heart beat:{} failed time:{}ms!", leader_id, i, time2);
                         } 
                     },
                     Err(_) => {
-                        my_debug!("leader:{} for heart beat:{} error! ", leader_id, i);
+                        //let time2 = time.elapsed().as_millis();
+                        //my_debug!("leader:{} do heart beat:{} error time:{}ms! ", leader_id, i, time2);
                     },
                 }
-                let _ret = tsend.send(1);
+                //let _ret = tsend.send(1);
             });
-            handles.push(handle);
+            //handles.push(handle);
         }
         /*for handle in handles {
             handle.join().unwrap();
         }*/
-        for j in 0..(nums - 1){
+        /*for j in 0..(nums - 1){
             let _ret = recv.recv_timeout(Duration::from_millis(BROADCAST_ERROR_WAIT_TIME));  //对于一个error的reply，最多等BROADCAST_ERROR_WAIT_TIME毫秒
             //let _ret = recv.recv();
         }
@@ -863,11 +972,11 @@ impl Node {
             }
             inode.update_next_and_match(new_next_match); //更新next_index和match_index
 
-        }
+        }*/
         
         //thread::sleep(Duration::from_millis(5));
-        let time2 = time.elapsed().as_millis();
-        my_debug!("leader:{} append time:{}ms", inode.get_id(), time2);
+        /*let time2 = time.elapsed().as_millis();
+        my_debug!("leader:{} append time:{}ms", inode.get_id(), time2);*/
 
     }
 
@@ -914,7 +1023,7 @@ impl Node {
     {
         if self.is_leader() {
             let ret = self.raft.lock().unwrap().start(command);
-            self.reset_append_thread_heart_beat();
+            //self.reset_append_thread_heart_beat();
             ret
         }
         else {
@@ -1018,6 +1127,11 @@ impl Node {
         raft.update_next_and_match(new_next_match);
     }
 
+    pub fn handle_append_reply(&self, id: u64, result: i32, for_next_index: u64) {
+        let mut raft = self.raft.lock().unwrap();
+        raft.handle_append_reply(id, result, for_next_index);
+    }
+
     /// the tester calls kill() when a Raft instance won't
     /// be needed again. you are not required to do anything
     /// in kill(), but it might be convenient to (for example)
@@ -1093,6 +1207,7 @@ impl RaftService for Node {
                 //self.reset_timeout_thread();
             }
             self.set_state(args.term, false, false);
+            reply.term = self.term();
             self.reset_timeout_thread();
 
         }
@@ -1106,6 +1221,7 @@ impl RaftService for Node {
         let mut reply = RequestEntryReply {
             term: self.term(),
             success: false,
+            next_index: 1,
         };
         if args.term < self.term() {
             my_debug!("error:me[{}:{}] recv [{}:{}]", self.get_id(), self.term(), args.leader_id, args.term);
@@ -1120,13 +1236,38 @@ impl RaftService for Node {
 
                         }
                         else {  //说明args.entries有效，
-                            if (self.get_last_log_index() as u64) > args.prev_log_index { //说明该节点后面的log需要删除，再添加args.entries
-                                self.delete_log(args.prev_log_index);
+                            for i in 0..args.entries.len() {
+                                let log_encode = args.entries[i].clone();
+                                match labcodec::decode(&log_encode) {
+                                    Ok(log) => {
+                                        let log: LogEntry = log;
+                                        let node_entry = self.get_log(args.prev_log_index + 1 + i as u64);
+                                        match node_entry {
+                                            Some(n_en) => {
+                                                if n_en == log { //log 相等，无需删除
+                                                    continue;
+                                                }
+                                                else {
+                                                    self.delete_log(args.prev_log_index + i as u64);
+                                                    self.push_log(log.index, log.term, &log.entry);
+                                                }
+                                            },
+                                            None => {
+                                                self.push_log(log.index, log.term, &log.entry);
+                                            }
+
+
+                                        }
+                                    },
+                                    Err(e) => {
+                                        panic!("{:?}", e);
+                                    },
+                                } 
                             }
-                            self.push_log(args.prev_log_index + 1, args.entries_term, &args.entries);
                         }
                         //进入这里，说明匹配成功，可以返回success
                         reply.success = true;
+                        reply.next_index = args.prev_log_index + 1 + args.entries.len() as u64;
                         if args.leader_commit > self.get_commit_index() {  //返回success,可提交commit
                             let new_commit_index: u64 = cmp::min(args.leader_commit, self.get_last_log_index() as u64);
                             self.set_commit_index(new_commit_index);

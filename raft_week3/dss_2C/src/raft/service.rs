@@ -56,13 +56,10 @@ pub struct RequestEntryArgs {
     #[prost(uint64, tag = "4")]
     pub prev_log_term: u64,
 
-    #[prost(bytes, tag = "5")]
-    pub entries: Vec<u8>,   //暂时一次发送一个，后面可Vec<Vec>发送多个
+    #[prost(bytes, repeated, tag = "5")]
+    pub entries: Vec<Vec<u8>>,   //发送LogEntry，一次Vec<Vec>发送多个
 
-    #[prost(uint64, tag = "6")]  //entries_term是entries的任期号，理论上entries是整个结构，增加一个参数表示任期，
-    pub entries_term: u64,
-
-    #[prost(uint64, tag = "7")]
+    #[prost(uint64, tag = "6")]
     pub leader_commit: u64,
 }
 
@@ -74,4 +71,7 @@ pub struct RequestEntryReply {
 
     #[prost(bool, tag="2")]
     pub success: bool,
+
+    #[prost(uint64, tag="3")]
+    pub next_index: u64,
 }

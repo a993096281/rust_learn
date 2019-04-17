@@ -280,6 +280,7 @@ impl Config {
                         match rf.start(&cmd) {
                             Ok((index1, _)) => {
                                 index = Some(index1);
+                                println!("get index");
                                 break;
                             }
                             Err(e) => debug!("start cmd {:?} failed: {:?}", cmd, e),
