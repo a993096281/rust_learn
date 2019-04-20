@@ -1,8 +1,8 @@
 #![allow(clippy::identity_op)]
 
-//use std::sync::atomic::{AtomicUsize, Ordering};
-//use std::sync::mpsc::{channel, Sender};
-//use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, Sender};
+use std::sync::{Arc, Mutex};
 //use std::sync::{Arc};
 use std::thread;
 use std::time::Duration;
@@ -11,9 +11,9 @@ use futures::sync::oneshot;
 use futures::{future, Future};
 use rand::{Rng, ThreadRng};
 
-use crate::raft::config::{Config, Entry};
-//use crate::raft::config::{Config, Entry, Storage};
-//use crate::raft::Node;
+//use crate::raft::config::{Config, Entry};
+use crate::raft::config::{Config, Entry, Storage};
+use crate::raft::Node;
 
 /// The tester generously allows solutions to complete elections in one second
 /// (much more than the paper's range of timeouts).
@@ -536,7 +536,7 @@ fn test_count_2b() {
     }
     cfg.end();
 }
-/*
+
 #[test]
 fn test_persist1_2c() {
     let servers = 3;
@@ -765,7 +765,7 @@ fn test_unreliable_agree_2c() {
 
     cfg.end();
 }
-*/
+
 #[test]
 fn test_figure_8_unreliable_2c() {
     let servers = 5;
@@ -803,7 +803,6 @@ fn test_figure_8_unreliable_2c() {
 
         if (random.gen::<usize>() % 1000) < 100 {
             let ms = random.gen::<u64>() % (RAFT_ELECTION_TIMEOUT.as_millis() as u64 / 2);
-            println!("sleep ms:{}", ms);
             thread::sleep(Duration::from_millis(ms as u64));
         } else {
             let ms = random.gen::<u64>() % 13;
@@ -813,7 +812,6 @@ fn test_figure_8_unreliable_2c() {
         if let Some(leader) = leader {
             if (random.gen::<usize>() % 1000) < (RAFT_ELECTION_TIMEOUT.as_millis() as usize) / 2 {
                 cfg.disconnect(leader);
-                println!("disconnect:{}", leader);
                 nup -= 1;
             }
         }
@@ -822,7 +820,6 @@ fn test_figure_8_unreliable_2c() {
             let s = random.gen::<usize>() % servers;
             if !cfg.connected[s] {
                 cfg.connect(s);
-                println!("connect:{}", s);
                 nup += 1;
             }
         }
@@ -831,7 +828,6 @@ fn test_figure_8_unreliable_2c() {
     for i in 0..servers {
         if !cfg.connected[i] {
             cfg.connect(i);
-            println!("connect:{}", i);
         }
     }
 
@@ -845,7 +841,7 @@ fn test_figure_8_unreliable_2c() {
 
     cfg.end();
 }
-/*
+
 fn internal_churn(unreliable: bool) {
     let servers = 5;
     let mut cfg = Config::new(servers, unreliable);
@@ -1006,4 +1002,4 @@ fn test_reliable_churn_2c() {
 #[test]
 fn test_unreliable_churn_2c() {
     internal_churn(true);
-}*/
+}

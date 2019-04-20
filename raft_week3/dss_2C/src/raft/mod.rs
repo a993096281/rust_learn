@@ -20,7 +20,7 @@ mod tests;
 use self::errors::*;
 use self::persister::*;
 use self::service::*;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+//use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::thread;
 use std::time::{Instant, Duration};
 use rand::Rng;
@@ -30,18 +30,18 @@ use self::config::Entry;
 #[macro_export]
 macro_rules! my_debug {
     ($($arg: tt)*) => (
-        println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
+        //println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
     )
 }
 
-const TIMEOUT_LOW_BOUND: u64 = 150;
-const TIMEOUT_HIGH_BOUND: u64 = 300;
+const TIMEOUT_LOW_BOUND: u64 = 200;
+const TIMEOUT_HIGH_BOUND: u64 = 350;
 const HEART_BEAT_LOW_BOUND: u64 = 95;
 const HEART_BEAT_HIGH_BOUND: u64 = 100;
 
 
 //const BROADCAST_ERROR_WAIT_TIME: u64 = 10; //广播时接收reply，每个接收最多等待time ms，意味着如果有两个节点error，投票或者心跳接收会等待2*time ms，
-const MAX_SEND_ENTRIES: u64 = 1000;  //一次最大可发送的entries
+const MAX_SEND_ENTRIES: u64 = 100;  //一次最大可发送的entries
 
 pub struct ApplyMsg {
     pub command_valid: bool,
@@ -232,7 +232,7 @@ impl Raft {
         self.state = leader;
         my_debug!("set id:{} term:{} islead:{} iscondi:{}", self.me, self.state.term(), self.state.is_leader(), self.state.is_candidate());
         if self.state.is_leader() {
-            self.next_index = Some(vec![ self.commit_index + 1 ; self.peers.len()]);
+            self.next_index = Some(vec![ 1 ; self.peers.len()]);
             self.match_index = Some(vec![ 0; self.peers.len()]);
         }
         else if self.is_candidate() {
@@ -636,11 +636,11 @@ pub struct Node {
     // Your code here.
     raft: Arc<Mutex<Raft>>,
     timeout_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,  //超时线程检测，只有follower有
-    timeout_true: Arc<AtomicBool>,                               //超时线程信号，true时代表超时，false代表不超时，简单重置
+    timeout_true: Arc<Mutex<bool>>,                               //超时线程信号，true时代表超时，false代表不超时，简单重置
     append_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,   //心跳线程，只有leader有
-    heart_beat_true: Arc<AtomicI32>,                             //心跳线程信号，0表示简单重置，1表示心跳，2表示发送包
+    heart_beat_true: Arc<Mutex<i32>>,                             //心跳线程信号，0表示简单重置，1表示心跳，2表示发送包
     vote_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,    //投票线程
-    shutdown: Arc<AtomicBool>,                                  //关闭信号
+    shutdown: Arc<Mutex<bool>>,                                  //关闭信号
     send: Arc<Mutex<Option<Sender<u32>>>>,
 
 
@@ -653,11 +653,11 @@ impl Node {
         let inode = Node {
             raft: Arc::new(Mutex::new(raft)),
             timeout_thread: Arc::new(Mutex::new(None)),
-            timeout_true: Arc::new(AtomicBool::new(false)),
+            timeout_true: Arc::new(Mutex::new(false)),
             append_thread: Arc::new(Mutex::new(None)),
-            heart_beat_true: Arc::new(AtomicI32::new(0)),
+            heart_beat_true: Arc::new(Mutex::new(0)),
             vote_thread: Arc::new(Mutex::new(None)),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(Mutex::new(false)),
             send: Arc::new(Mutex::new(None)),
         };
         my_debug!("New inode:{}",inode.get_id());
@@ -673,19 +673,22 @@ impl Node {
         let tthread = thread::spawn(move || {
             my_debug!("creat_timeout_thread:{:p}", &iinode);
             loop {
+                let time = Instant::now();
                 match iinode.is_leader() {
                     true => thread::park(),
                     false => {},
                 }
                 let rand_sleep = Duration::from_millis(rand::thread_rng().gen_range(TIMEOUT_LOW_BOUND, TIMEOUT_HIGH_BOUND));
-                iinode.timeout_true.store(true, Ordering::Relaxed);
+                *iinode.timeout_true.lock().unwrap() = true;
                 thread::park_timeout(rand_sleep);
                 //my_debug!("id:{} timeout_thread unpark:{}", iinode.get_id(), iinode.timeout_true.load(Ordering::Relaxed));
-                if iinode.shutdown.load(Ordering::Relaxed) == true { //关闭
+                if *iinode.shutdown.lock().unwrap() == true { //关闭
                     my_debug!("id:{} shutdown timeout_thread ", iinode.get_id());
                     break;
                 }
-                if iinode.timeout_true.load(Ordering::Relaxed) == true { //超时，需要成为候选者
+                if *iinode.timeout_true.lock().unwrap() == true { //超时，需要成为候选者
+                    let time2 = time.elapsed().as_millis();
+                    my_debug!("id:{} vote_send time:{}ms timeout:{}",iinode.get_id(), time2 ,*iinode.timeout_true.lock().unwrap());
                     let _ret = vote_send.send(1); //发送成为候选者信号
                 }
             }
@@ -702,7 +705,7 @@ impl Node {
             my_debug!("creat_vote_thread:{:p}", &inode);
             loop {
                 vote_recv.recv().unwrap();  //接收到成为候选者
-                if inode.shutdown.load(Ordering::Relaxed) == true { //关闭
+                if *inode.shutdown.lock().unwrap() == true { //关闭
                     my_debug!("id:{} shutdown vote_thread ", inode.get_id());
                     break;
                 }
@@ -817,7 +820,7 @@ impl Node {
         match *self.timeout_thread.lock().unwrap() {
             Some(ref thread) => {
                 my_debug!("{} reset_timeout_thread", self.get_id());
-                self.timeout_true.store(false, Ordering::Relaxed);
+                *self.timeout_true.lock().unwrap() = false;
                 thread.thread().unpark();
             }
             None => {
@@ -836,13 +839,13 @@ impl Node {
                     false => thread::park(),
                 }
                 let rand_sleep = Duration::from_millis(rand::thread_rng().gen_range(HEART_BEAT_LOW_BOUND, HEART_BEAT_HIGH_BOUND));
-                iinode.heart_beat_true.store(1, Ordering::Relaxed);
+                *iinode.heart_beat_true.lock().unwrap() = 1;
                 thread::park_timeout(rand_sleep);
-                if iinode.shutdown.load(Ordering::Relaxed) == true { //关闭
+                if *iinode.shutdown.lock().unwrap() == true { //关闭
                     my_debug!("id:{} shutdown append_thread ", iinode.get_id());
                     break;
                 }
-                if iinode.is_leader() && iinode.heart_beat_true.load(Ordering::Relaxed) == 1 { //心跳，广播,发送包和心跳一样
+                if iinode.is_leader() && *iinode.heart_beat_true.lock().unwrap() == 1 { //心跳，广播,发送包和心跳一样
                     Node::send_followers_append_entries(iinode.clone());
                 }
             }
@@ -919,7 +922,10 @@ impl Node {
                     Ok(rep) => {
                         if rep.success  {
                             //*result.lock().unwrap() = 1;
-                            iinode.handle_append_reply(i as u64, 1, rep.next_index);
+                            if rep.term == iinode.term() {
+                                iinode.handle_append_reply(i as u64, 1, rep.next_index);
+
+                            }
                             let time2 = time.elapsed().as_millis();
                             my_debug!("leader:{} do heart beat:{} success time:{}ms! ", leader_id, i, time2);
                         }
@@ -932,7 +938,9 @@ impl Node {
                                 iinode.reset_timeout_thread();
                             }
                             else {
-                                iinode.handle_append_reply(i as u64, 0, rep.next_index);
+                                if rep.term == iinode.term() {
+                                    iinode.handle_append_reply(i as u64, 0, rep.next_index);
+                                }
                             }
                             let time2 = time.elapsed().as_millis();
                             my_debug!("leader:{} do heart beat:{} failed time:{}ms!", leader_id, i, time2);
@@ -983,7 +991,7 @@ impl Node {
     pub fn reset_append_thread(&self) {
         match *self.append_thread.lock().unwrap() {
             Some(ref thread) => {
-                self.heart_beat_true.store(0, Ordering::Relaxed);
+                *self.heart_beat_true.lock().unwrap() = 0;
                 thread.thread().unpark();
             }
             None => {
@@ -995,7 +1003,7 @@ impl Node {
     pub fn reset_append_thread_heart_beat(&self) {
         match *self.append_thread.lock().unwrap() {
             Some(ref thread) => {
-                self.heart_beat_true.store(1, Ordering::Relaxed);
+                *self.heart_beat_true.lock().unwrap() = 1;
                 thread.thread().unpark();
             }
             None => {
@@ -1138,7 +1146,7 @@ impl Node {
     /// turn off debug output from this instance.
     pub fn kill(&self) {
         // Your code here, if desired.
-        self.shutdown.store(true, Ordering::Relaxed);
+        *self.shutdown.lock().unwrap() = true;
         match *self.send.lock().unwrap() {
             Some(ref send) => {
                 let _ret = send.send(1);
@@ -1227,7 +1235,7 @@ impl RaftService for Node {
             my_debug!("error:me[{}:{}] recv [{}:{}]", self.get_id(), self.term(), args.leader_id, args.term);
         }
         else {
-            
+            //self.reset_timeout_thread();
             let entry = self.get_log(args.prev_log_index);
             match entry {
                 Some(en) => { //说明存在entry
@@ -1268,8 +1276,9 @@ impl RaftService for Node {
                         //进入这里，说明匹配成功，可以返回success
                         reply.success = true;
                         reply.next_index = args.prev_log_index + 1 + args.entries.len() as u64;
-                        if args.leader_commit > self.get_commit_index() {  //返回success,可提交commit
-                            let new_commit_index: u64 = cmp::min(args.leader_commit, self.get_last_log_index() as u64);
+                        let can_commit = cmp::min(args.leader_commit, reply.next_index - 1);
+                        if can_commit > self.get_commit_index() {  //返回success,可提交commit
+                            let new_commit_index: u64 = cmp::min(can_commit, self.get_last_log_index() as u64);
                             self.set_commit_index(new_commit_index);
                         }
 
