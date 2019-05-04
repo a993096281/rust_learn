@@ -422,7 +422,7 @@ fn test_count_2b() {
     let mut cfg = Config::new(SERVERS, false);
 
     cfg.begin("Test (2B): RPC counts aren't too high");
-    
+
     cfg.check_one_leader();
     let mut total1 = rpcs(&cfg);
 

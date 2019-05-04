@@ -277,7 +277,7 @@ fn generic_test(
             ));
         }
         thread::sleep(Duration::from_secs(5));
-
+        println!("sleep 5s");
         // tell clients to quit
         done_clients.store(1, Ordering::Relaxed);
         // tell partitioner to quit

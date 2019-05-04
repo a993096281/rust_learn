@@ -2,12 +2,12 @@ extern crate rand;
 
 use std::sync::{Arc, Mutex};
 
-use std::sync::mpsc;
-use std::sync::mpsc::Sender;
 use futures::sync::mpsc::UnboundedSender;
 use futures::Future;
 use labcodec;
 use labrpc::RpcFuture;
+use std::sync::mpsc;
+use std::sync::mpsc::Sender;
 
 #[cfg(test)]
 pub mod config;
@@ -21,16 +21,17 @@ use self::errors::*;
 use self::persister::*;
 use self::service::*;
 //use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::thread;
-use std::time::{Instant, Duration};
 use rand::Rng;
 use std::cmp;
-use self::config::Entry;
+use std::thread;
+use std::time::{Duration, Instant};
+//use self::config::Entry;
+use crate::kvraft::server::OpEntry as Entry;
 
 #[macro_export]
 macro_rules! my_debug {
     ($($arg: tt)*) => (
-        //println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
+        println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
     )
 }
 
@@ -39,10 +40,9 @@ const TIMEOUT_HIGH_BOUND: u64 = 350;
 const HEART_BEAT_LOW_BOUND: u64 = 95;
 const HEART_BEAT_HIGH_BOUND: u64 = 100;
 
-
 //const BROADCAST_ERROR_WAIT_TIME: u64 = 10; //广播时接收reply，每个接收最多等待time ms，意味着如果有两个节点error，投票或者心跳接收会等待2*time ms，
-const MAX_SEND_ENTRIES: u64 = 100;  //一次最大可发送的entries
-
+const MAX_SEND_ENTRIES: u64 = 100; //一次最大可发送的entries
+#[derive(Clone, Debug)]
 pub struct ApplyMsg {
     pub command_valid: bool,
     pub command: Vec<u8>,
@@ -52,20 +52,20 @@ pub struct ApplyMsg {
 /// State of a raft peer.
 #[derive(Clone, PartialEq, Message)]
 pub struct State {
-    #[prost(uint64, tag="1")]
+    #[prost(uint64, tag = "1")]
     pub term: u64,
 
-    #[prost(bool, tag="2")]
+    #[prost(bool, tag = "2")]
     pub is_leader: bool,
 
-    #[prost(bool, tag="3")]
+    #[prost(bool, tag = "3")]
     pub is_candidate: bool,
 }
 
 impl State {
     /// The current term of this peer.
-    fn new() -> Self{
-        State{
+    fn new() -> Self {
+        State {
             term: 0,
             is_leader: false,
             is_candidate: false,
@@ -83,28 +83,28 @@ impl State {
     }
 }
 #[derive(Clone, PartialEq, Message)]
-pub struct LogEntry{
-    #[prost(uint64, tag="1")]
-    pub index: u64,   //主要做检验，理论上以Vec的下标为主
+pub struct LogEntry {
+    #[prost(uint64, tag = "1")]
+    pub index: u64, //主要做检验，理论上以Vec的下标为主
 
-    #[prost(uint64, tag="2")]
+    #[prost(uint64, tag = "2")]
     pub term: u64,
 
-    #[prost(bytes, tag="3")]
+    #[prost(bytes, tag = "3")]
     pub entry: Vec<u8>,
 }
 
-impl LogEntry{
-    fn new() -> Self{
-        LogEntry{
+impl LogEntry {
+    fn new() -> Self {
+        LogEntry {
             index: 0,
             term: 0,
             entry: vec![],
         }
     }
 
-    fn from_data(index: u64, term: u64, src_entry: &Vec<u8>) -> Self{
-        LogEntry{
+    fn from_data(index: u64, term: u64, src_entry: &Vec<u8>) -> Self {
+        LogEntry {
             index,
             term,
             entry: src_entry.clone(),
@@ -113,28 +113,29 @@ impl LogEntry{
 }
 //保持所有状态
 #[derive(Clone, PartialEq, Message)]
-pub struct RaftState {   //voted_for暂时觉得没必要保存
-    #[prost(uint64, tag="1")]
+pub struct RaftState {
+    //voted_for暂时觉得没必要保存
+    #[prost(uint64, tag = "1")]
     pub term: u64,
 
-    #[prost(bool, tag="2")]
+    #[prost(bool, tag = "2")]
     pub is_leader: bool,
 
-    #[prost(bool, tag="3")]
+    #[prost(bool, tag = "3")]
     pub is_candidate: bool,
 
-    #[prost(uint64, tag="4")]
+    #[prost(uint64, tag = "4")]
     pub commit_index: u64,
 
-    #[prost(uint64, tag="5")]
+    #[prost(uint64, tag = "5")]
     pub last_applied: u64,
 
-    #[prost(bytes, repeated, tag="6")]
+    #[prost(bytes, repeated, tag = "6")]
     pub logs: Vec<Vec<u8>>,
 }
 impl RaftState {
-    fn new() -> Self{
-        RaftState{
+    fn new() -> Self {
+        RaftState {
             term: 0,
             is_leader: false,
             is_candidate: false,
@@ -156,15 +157,15 @@ pub struct Raft {
     state: State,
     apply_ch: UnboundedSender<ApplyMsg>,
     voted_for: Option<u64>,
-    log: Vec<LogEntry>,         //日志条目，1开始，并且Vec下标为索引
-    commit_index: u64,  //已提交的日志条目，增加Option主要是开始为None，值为log下标索引
-    last_applied: u64,  //最后被应用到状态机的日志条目索引值，增加Option主要是开始为None，值为log下标索引
-    next_index: Option<Vec<u64>>,   //对于每一个服务器，需要发送给他的下一个日志条目的索引值
-    match_index: Option<Vec<u64>>,  //对于每一个服务器，已经复制给他的日志的最高索引值
+    log: Vec<LogEntry>,           //日志条目，1开始，并且Vec下标为索引
+    commit_index: u64,            //已提交的日志条目，增加Option主要是开始为None，值为log下标索引
+    last_applied: u64, //最后被应用到状态机的日志条目索引值，增加Option主要是开始为None，值为log下标索引
+    next_index: Option<Vec<u64>>, //对于每一个服务器，需要发送给他的下一个日志条目的索引值
+    match_index: Option<Vec<u64>>, //对于每一个服务器，已经复制给他的日志的最高索引值
 
-    // Your data here (2A, 2B, 2C).
-    // Look at the paper's Figure 2 for a description of what
-    // state a Raft server must maintain.
+                       // Your data here (2A, 2B, 2C).
+                       // Look at the paper's Figure 2 for a description of what
+                       // state a Raft server must maintain.
 }
 
 impl Raft {
@@ -198,14 +199,20 @@ impl Raft {
             next_index: None,
             match_index: None,
         };
-        my_debug!("id:{} term:{} islead:{} iscondi:{}", me, rf.state.term(), rf.state.is_leader(), rf.state.is_candidate());
+        my_debug!(
+            "id:{} term:{} islead:{} iscondi:{}",
+            me,
+            rf.state.term(),
+            rf.state.is_leader(),
+            rf.state.is_candidate()
+        );
         // initialize from state persisted before a crash
         rf.restore(&raft_state);
         rf
     }
-    pub fn term(&self) -> u64{
+    pub fn term(&self) -> u64 {
         self.state.term()
-    } 
+    }
 
     pub fn is_leader(&self) -> bool {
         self.state.is_leader()
@@ -222,24 +229,28 @@ impl Raft {
     pub fn set_votefor(&mut self, vote: Option<u64>) {
         self.voted_for = vote;
     }
-    
+
     pub fn set_state(&mut self, term: u64, is_leader: bool, is_candidate: bool) {
-        let leader = State{
+        let leader = State {
             term,
             is_leader,
             is_candidate,
         };
         self.state = leader;
-        my_debug!("set id:{} term:{} islead:{} iscondi:{}", self.me, self.state.term(), self.state.is_leader(), self.state.is_candidate());
+        my_debug!(
+            "set id:{} term:{} islead:{} iscondi:{}",
+            self.me,
+            self.state.term(),
+            self.state.is_leader(),
+            self.state.is_candidate()
+        );
         if self.state.is_leader() {
-            self.next_index = Some(vec![ 1 ; self.peers.len()]);
-            self.match_index = Some(vec![ 0; self.peers.len()]);
-        }
-        else if self.is_candidate() {
+            self.next_index = Some(vec![1; self.peers.len()]);
+            self.match_index = Some(vec![0; self.peers.len()]);
+        } else if self.is_candidate() {
             self.next_index = None;
             self.match_index = None;
-        }
-        else {
+        } else {
             self.next_index = None;
             self.match_index = None;
         }
@@ -251,7 +262,7 @@ impl Raft {
     }
 
     pub fn get_last_log_index(&self) -> usize {
-        self.log.len() - 1 
+        self.log.len() - 1
     }
 
     pub fn get_last_log_term(&self) -> u64 {
@@ -265,14 +276,13 @@ impl Raft {
     pub fn get_log(&self, index: u64) -> Option<LogEntry> {
         if ((self.log.len() - 1) as u64) < index {
             None
-        }
-        else {
+        } else {
             Some(self.log[index as usize].clone())
         }
     }
 
     pub fn get_commit_index(&self) -> u64 {
-        self.commit_index 
+        self.commit_index
     }
 
     pub fn update_next_and_match(&mut self, new_next_match: Vec<i32>) {
@@ -288,13 +298,14 @@ impl Raft {
             if i == self.me as usize {
                 continue;
             }
-            if new_next_match[i] == 1 {  //收到success
-                match_index[i] =  next_index[i] - 1;
+            if new_next_match[i] == 1 {
+                //收到success
+                match_index[i] = next_index[i] - 1;
                 if next_index[i] < self.log.len() as u64 {
                     next_index[i] += 1;
                 }
-            }
-            else if new_next_match[i] == 0 {  //收到fail
+            } else if new_next_match[i] == 0 {
+                //收到fail
                 next_index[i] -= 1;
             }
             //收到error，不变
@@ -305,7 +316,8 @@ impl Raft {
         my_debug!("id:{} after next_index:{:?}", self.me, next_index);
         //查看是否更新commit
         let mut new_commit_index: u64 = 0;
-        for index in ((self.commit_index + 1)..(self.log.len() as u64)).rev() { //rev()逆序，从大到小开始检测
+        for index in ((self.commit_index + 1)..(self.log.len() as u64)).rev() {
+            //rev()逆序，从大到小开始检测
             let mut pass: usize = 0;
             for i in 0..self.get_peers_num() as usize {
                 if i == self.me as usize {
@@ -316,7 +328,8 @@ impl Raft {
                 }
             }
             //my_debug!("id:{} pass:{:?}", self.me, pass);
-            if (pass + 1) > self.get_peers_num()/2 { //说明通过超过半数，可commit
+            if (pass + 1) > self.get_peers_num() / 2 {
+                //说明通过超过半数，可commit
                 new_commit_index = index;
                 break;
             }
@@ -327,11 +340,18 @@ impl Raft {
         }
     }
 
-    pub fn handle_append_reply(&mut self, id: u64, result: i32, for_next_index: u64) {  //1:sucess 0:fail -1:error
+    pub fn handle_append_reply(&mut self, id: u64, result: i32, for_next_index: u64) {
+        //1:sucess 0:fail -1:error
         if !self.is_leader() || self.match_index == None || self.next_index == None {
             return;
         }
-        my_debug!("leader:{} handle_append_reply id:{} result:{} for_next_index:{}", self.me, id, result, for_next_index);
+        my_debug!(
+            "leader:{} handle_append_reply id:{} result:{} for_next_index:{}",
+            self.me,
+            id,
+            result,
+            for_next_index
+        );
         if for_next_index < 1 || for_next_index > self.log.len() as u64 {
             return;
         }
@@ -340,15 +360,15 @@ impl Raft {
         my_debug!("id:{} before match_index:{:?}", self.me, match_index);
         my_debug!("id:{} before next_index:{:?}", self.me, next_index);
         let id = id as usize;
-        if result == 1 {  //收到success
-            match_index[id] =  for_next_index - 1;
+        if result == 1 {
+            //收到success
+            match_index[id] = for_next_index - 1;
             next_index[id] = for_next_index;
-        }
-        else if result == 0 {  //收到fail
+        } else if result == 0 {
+            //收到fail
             if next_index[id] < (MAX_SEND_ENTRIES + 1) {
                 next_index[id] = 1;
-            }
-            else {
+            } else {
                 next_index[id] -= MAX_SEND_ENTRIES;
             }
         }
@@ -359,10 +379,11 @@ impl Raft {
         my_debug!("id:{} after next_index:{:?}", self.me, next_index);
         if result == 0 || result == -1 {
             return;
-        } 
+        }
         //查看是否更新commit
         let mut new_commit_index: u64 = 0;
-        for index in ((self.commit_index + 1)..(match_index[id] + 1)).rev() { //rev()逆序，从大到小开始检测
+        for index in ((self.commit_index + 1)..(match_index[id] + 1)).rev() {
+            //rev()逆序，从大到小开始检测
             let mut pass: usize = 0;
             for i in 0..self.get_peers_num() as usize {
                 if i == self.me as usize {
@@ -372,7 +393,8 @@ impl Raft {
                     pass += 1;
                 }
             }
-            if (pass + 1) > self.get_peers_num()/2 { //说明通过超过半数，可commit
+            if (pass + 1) > self.get_peers_num() / 2 {
+                //说明通过超过半数，可commit
                 new_commit_index = index;
                 break;
             }
@@ -385,10 +407,10 @@ impl Raft {
             my_debug!("id:{} new_commit_index:{:?}", self.me, new_commit_index);
             self.set_commit_index(new_commit_index);
         }
-
     }
 
-    pub fn delete_log(&mut self,save_index: u64) { //删除save_index后面的log，save_index不删除
+    pub fn delete_log(&mut self, save_index: u64) {
+        //删除save_index后面的log，save_index不删除
         if ((self.log.len() - 1) as u64) < save_index {
             return;
         }
@@ -400,41 +422,68 @@ impl Raft {
             match labcodec::decode(&entry) {
                 Ok(en) => {
                     _entr = Some(en);
-                },
-                Err(e) => {},
+                }
+                Err(e) => {}
             }
-            my_debug!("id:{} delete log:[{}:{}:{:?}]", self.me, de.index, de.term,_entr);
+            my_debug!(
+                "id:{} delete log:[{}:{}:{:?}]",
+                self.me,
+                de.index,
+                de.term,
+                _entr
+            );
         }
-
     }
 
     pub fn push_log(&mut self, index: u64, term: u64, entry: &Vec<u8>) {
         if self.log.len() as u64 != index {
-            my_debug!("error:id:{} push index:{} error log:[{}:{}]", self.me, self.log.len(), index, term);
+            my_debug!(
+                "error:id:{} push index:{} error log:[{}:{}]",
+                self.me,
+                self.log.len(),
+                index,
+                term
+            );
             return;
         }
         self.log.push(LogEntry::from_data(index, term, entry));
-        self.persist(); 
+        self.persist();
         let mut _entr: Option<Entry> = None;
         match labcodec::decode(&entry) {
             Ok(en) => {
                 _entr = Some(en);
-            },
-            Err(e) => {},
+            }
+            Err(e) => {}
         }
-        my_debug!("id:{} push log:[{}:{}:{:?}] ", self.me, index, term, _entr.unwrap());
-
+        my_debug!(
+            "id:{} push log:[{}:{}:{:?}] ",
+            self.me,
+            index,
+            term,
+            _entr.unwrap()
+        );
     }
 
     pub fn set_commit_index(&mut self, new_commit_index: u64) {
         if new_commit_index < self.commit_index {
-            my_debug!("error:id:{} set_commit_index fail:[{}-{}]", self.me, self.commit_index, new_commit_index);
+            my_debug!(
+                "error:id:{} set_commit_index fail:[{}-{}]",
+                self.me,
+                self.commit_index,
+                new_commit_index
+            );
             return;
         }
-        my_debug!("id:{} set commit_index:[{}->{}]", self.me, self.commit_index, new_commit_index);
+        my_debug!(
+            "id:{} set commit_index:[{}->{}]",
+            self.me,
+            self.commit_index,
+            new_commit_index
+        );
         self.commit_index = new_commit_index;
-        if self.commit_index > self.last_applied { //更新状态机
-        let last = self.last_applied;
+        if self.commit_index > self.last_applied {
+            //更新状态机
+            let last = self.last_applied;
             for i in last..self.commit_index {
                 self.last_applied += 1; //并发送
                 let mesg = ApplyMsg {
@@ -447,7 +496,6 @@ impl Raft {
                 self.persist();
             }
         }
-
     }
 
     /// save Raft's persistent state to stable storage,
@@ -468,7 +516,8 @@ impl Raft {
             last_applied: self.last_applied,
             logs: vec![],
         };
-        for i in 1..self.log.len() { //从1开始，不保存index为0的空log
+        for i in 1..self.log.len() {
+            //从1开始，不保存index为0的空log
             let mut dat = vec![];
             let log = self.log[i].clone();
             let _ret = labcodec::encode(&log, &mut dat).map_err(Error::Encode);
@@ -513,23 +562,22 @@ impl Raft {
                 my_debug!("num:{}", state.logs.len());
                 for i in 0..state.logs.len() {
                     let log_encode = state.logs[i].clone();
-                     match labcodec::decode(&log_encode) {
+                    match labcodec::decode(&log_encode) {
                         Ok(log) => {
                             let log: LogEntry = log;
                             self.log.push(log.clone());
                             my_debug!("id:{} restore log :{:?}", self.me, log);
-                        },
+                        }
                         Err(e) => {
                             panic!("{:?}", e);
-                        },
-                     }
+                        }
+                    }
                 }
                 //my_debug!("id:{} restore set state:{:?}", self.me, self.state);
-
-            },
+            }
             Err(e) => {
                 panic!("{:?}", e);
-            },
+            }
         }
     }
 
@@ -550,7 +598,11 @@ impl Raft {
     /// is no need to implement your own timeouts around this method.
     ///
     /// look at the comments in ../labrpc/src/mod.rs for more details.
-    pub fn send_request_vote(&self, server: usize, args: &RequestVoteArgs) -> Result<RequestVoteReply> {
+    pub fn send_request_vote(
+        &self,
+        server: usize,
+        args: &RequestVoteArgs,
+    ) -> Result<RequestVoteReply> {
         let peer = &self.peers[server];
         // Your code here if you want the rpc becomes async.
         // Example:
@@ -567,35 +619,38 @@ impl Raft {
         // rx.wait() ...
         // ```
         /*let (tx, rx) = mpsc::channel();
-         peer.spawn(
-             peer.request_vote(&args)
-                 .map_err(Error::Rpc)
-                .then(move |res| {
-                     tx.send(res);
-                     Ok(())
-                 }),
-         );
-         rx.wait() */
+        peer.spawn(
+            peer.request_vote(&args)
+                .map_err(Error::Rpc)
+               .then(move |res| {
+                    tx.send(res);
+                    Ok(())
+                }),
+        );
+        rx.wait() */
         peer.request_vote(&args).map_err(Error::Rpc).wait()
     }
 
     pub fn get_peers(&self) -> Vec<RaftClient> {
         self.peers.clone()
-
     }
-    pub fn send_append_entries(&self, server: usize, args: &RequestEntryArgs) -> Result<RequestEntryReply> {
+    pub fn send_append_entries(
+        &self,
+        server: usize,
+        args: &RequestEntryArgs,
+    ) -> Result<RequestEntryReply> {
         let peer = &self.peers[server];
         /*let (tx, rx) = mpsc::channel();
-         peer.spawn(
-             peer.append_entries(&args)
-                 .map_err(Error::Rpc)
-                .then(move |res| {
-                     tx.send(res);
-                     Ok(())
-                 }),
-         );
-         rx.wait();
-         Err(Error::Rpc)*/
+        peer.spawn(
+            peer.append_entries(&args)
+                .map_err(Error::Rpc)
+               .then(move |res| {
+                    tx.send(res);
+                    Ok(())
+                }),
+        );
+        rx.wait();
+        Err(Error::Rpc)*/
         peer.append_entries(&args).map_err(Error::Rpc).wait()
     }
 
@@ -610,8 +665,7 @@ impl Raft {
             labcodec::encode(command, &mut buf).map_err(Error::Encode)?;
             self.push_log(index, term, &buf);
             Ok((index, term))
-        }
-        else {
+        } else {
             Err(Error::NotLeader)
         }
     }
@@ -635,15 +689,13 @@ impl Raft {
 pub struct Node {
     // Your code here.
     raft: Arc<Mutex<Raft>>,
-    timeout_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,  //超时线程检测，只有follower有
-    timeout_true: Arc<Mutex<bool>>,                               //超时线程信号，true时代表超时，false代表不超时，简单重置
-    append_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,   //心跳线程，只有leader有
-    heart_beat_true: Arc<Mutex<i32>>,                             //心跳线程信号，0表示简单重置，1表示心跳，2表示发送包
-    vote_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,    //投票线程
-    shutdown: Arc<Mutex<bool>>,                                  //关闭信号
+    timeout_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>, //超时线程检测，只有follower有
+    timeout_true: Arc<Mutex<bool>>, //超时线程信号，true时代表超时，false代表不超时，简单重置
+    append_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>, //心跳线程，只有leader有
+    heart_beat_true: Arc<Mutex<i32>>, //心跳线程信号，0表示简单重置，1表示心跳，2表示发送包
+    vote_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>, //投票线程
+    shutdown: Arc<Mutex<bool>>,     //关闭信号
     send: Arc<Mutex<Option<Sender<u32>>>>,
-
-
 }
 
 impl Node {
@@ -660,9 +712,9 @@ impl Node {
             shutdown: Arc::new(Mutex::new(false)),
             send: Arc::new(Mutex::new(None)),
         };
-        my_debug!("New inode:{}",inode.get_id());
+        my_debug!("New inode:{}", inode.get_id());
         let recv = Node::creat_timeout_thread(inode.clone());
-        Node::creat_vote_thread(inode.clone(),recv);
+        Node::creat_vote_thread(inode.clone(), recv);
         Node::creat_append_thread(inode.clone());
         inode
     }
@@ -676,36 +728,46 @@ impl Node {
                 let time = Instant::now();
                 match iinode.is_leader() {
                     true => thread::park(),
-                    false => {},
+                    false => {}
                 }
-                let rand_sleep = Duration::from_millis(rand::thread_rng().gen_range(TIMEOUT_LOW_BOUND, TIMEOUT_HIGH_BOUND));
+                let rand_sleep = Duration::from_millis(
+                    rand::thread_rng().gen_range(TIMEOUT_LOW_BOUND, TIMEOUT_HIGH_BOUND),
+                );
                 *iinode.timeout_true.lock().unwrap() = true;
                 thread::park_timeout(rand_sleep);
                 //my_debug!("id:{} timeout_thread unpark:{}", iinode.get_id(), iinode.timeout_true.load(Ordering::Relaxed));
-                if *iinode.shutdown.lock().unwrap() == true { //关闭
+                if *iinode.shutdown.lock().unwrap() == true {
+                    //关闭
                     my_debug!("id:{} shutdown timeout_thread ", iinode.get_id());
                     break;
                 }
-                if *iinode.timeout_true.lock().unwrap() == true { //超时，需要成为候选者
+                if *iinode.timeout_true.lock().unwrap() == true {
+                    //超时，需要成为候选者
                     let time2 = time.elapsed().as_millis();
-                    my_debug!("id:{} vote_send time:{}ms timeout:{}",iinode.get_id(), time2 ,*iinode.timeout_true.lock().unwrap());
+                    my_debug!(
+                        "id:{} vote_send time:{}ms timeout:{}",
+                        iinode.get_id(),
+                        time2,
+                        *iinode.timeout_true.lock().unwrap()
+                    );
                     let _ret = vote_send.send(1); //发送成为候选者信号
                 }
             }
-
         });
         *inode.timeout_thread.lock().unwrap() = Some(tthread);
         *inode.send.lock().unwrap() = Some(send);
         vote_recv
     }
 
-    pub fn creat_vote_thread(iiinode: Node,vote_recv: mpsc::Receiver<u32>) {
+    pub fn creat_vote_thread(iiinode: Node, vote_recv: mpsc::Receiver<u32>) {
         let inode = iiinode.clone();
-        let vthread = thread::spawn(move || { //投票线程
+        let vthread = thread::spawn(move || {
+            //投票线程
             my_debug!("creat_vote_thread:{:p}", &inode);
             loop {
-                vote_recv.recv().unwrap();  //接收到成为候选者
-                if *inode.shutdown.lock().unwrap() == true { //关闭
+                vote_recv.recv().unwrap(); //接收到成为候选者
+                if *inode.shutdown.lock().unwrap() == true {
+                    //关闭
                     my_debug!("id:{} shutdown vote_thread ", inode.get_id());
                     break;
                 }
@@ -719,10 +781,16 @@ impl Node {
                     last_log_index: inode.get_last_log_index() as u64,
                     last_log_term: inode.get_last_log_term(),
                 };
-                my_debug!("candidate:{} term:{} commit:{} args:{:?}", inode.get_id(),inode.term(), inode.get_commit_index(), args);
-                let passed = Arc::new(Mutex::new(1));  //先给自己投一票
+                my_debug!(
+                    "candidate:{} term:{} commit:{} args:{:?}",
+                    inode.get_id(),
+                    inode.term(),
+                    inode.get_commit_index(),
+                    args
+                );
+                let passed = Arc::new(Mutex::new(1)); //先给自己投一票
                 let have_better_leader = Arc::new(Mutex::new(false)); //存在term更大的节点
-                //let mut handles = vec![];
+                                                                      //let mut handles = vec![];
                 let nums = inode.get_peers_num();
                 let peers;
                 {
@@ -751,36 +819,44 @@ impl Node {
                                 if rep.vote_granted {
                                     *passed.lock().unwrap() += 1;
                                     let time2 = time.elapsed().as_millis();
-                                    my_debug!("candidate:{} for vote:{} passed time:{}!", leader_id, i, time2);
-                                    if *passed.lock().unwrap() > nums/2 && iinode.is_candidate() && term == iinode.term() {  //投票成功，并仍是候选者状态
-                                            iinode.set_state(term, true, false); //成为leared
-                                            //广播心跳
-                                            my_debug!("{} become leader!", iinode.get_id());
-                                            Node::send_followers_append_entries(iinode.clone());
-                                            iinode.reset_append_thread();
-                                            iinode.reset_timeout_thread();
+                                    my_debug!(
+                                        "candidate:{} for vote:{} passed time:{}!",
+                                        leader_id,
+                                        i,
+                                        time2
+                                    );
+                                    if *passed.lock().unwrap() > nums / 2
+                                        && iinode.is_candidate()
+                                        && term == iinode.term()
+                                    {
+                                        //投票成功，并仍是候选者状态
+                                        iinode.set_state(term, true, false); //成为leared
+                                                                             //广播心跳
+                                        my_debug!("{} become leader!", iinode.get_id());
+                                        Node::send_followers_append_entries(iinode.clone());
+                                        iinode.reset_append_thread();
+                                        iinode.reset_timeout_thread();
                                     }
-                                    //*passed.lock().unwrap() += 1;
-                                    //my_debug!("candidate:{} for vote:{} passed!", leader_id, i);
-                                }
-                                else if rep.term > iinode.term() { //遇到term更大节点
+                                //*passed.lock().unwrap() += 1;
+                                //my_debug!("candidate:{} for vote:{} passed!", leader_id, i);
+                                } else if rep.term > iinode.term() {
+                                    //遇到term更大节点
                                     iinode.set_state(rep.term, false, false);
                                     iinode.set_votefor(None);
                                     iinode.reset_timeout_thread();
                                     //*have_better_leader.lock().unwrap() = true;
                                     let time2 = time.elapsed().as_millis();
                                     my_debug!("candidate:{} for vote:{} fail time:{}ms find have_better_leader because term!", leader_id, i, time2);
-
                                 }
                                 //else if rep.last_log_index > iinode.get_last_log_index() as u64 { //遇到log更新的节点
-                                    //*have_better_leader.lock().unwrap() = true;
-                                    //my_debug!("candidate:{} for vote:{} find have_better_leader because log index!", iinode.get_id(), i);
+                                //*have_better_leader.lock().unwrap() = true;
+                                //my_debug!("candidate:{} for vote:{} find have_better_leader because log index!", iinode.get_id(), i);
                                 //}
-                            },
+                            }
                             Err(_) => {
                                 //let time2 = time.elapsed().as_millis();
                                 //my_debug!("candidate:{} for vote:{} error time:{}ms!", leader_id, i, time2);
-                            },
+                            }
                         }
                         //let _ret = tsend.send(1);
                     });
@@ -809,9 +885,7 @@ impl Node {
                         inode.reset_timeout_thread();
                     }
                 }*/
-            
             }
-
         });
         *iiinode.vote_thread.lock().unwrap() = Some(vthread);
     }
@@ -835,26 +909,30 @@ impl Node {
             my_debug!("creat_append_thread:{:p}", &iinode);
             loop {
                 match iinode.is_leader() {
-                    true => {},
+                    true => {}
                     false => thread::park(),
                 }
-                let rand_sleep = Duration::from_millis(rand::thread_rng().gen_range(HEART_BEAT_LOW_BOUND, HEART_BEAT_HIGH_BOUND));
+                let rand_sleep = Duration::from_millis(
+                    rand::thread_rng().gen_range(HEART_BEAT_LOW_BOUND, HEART_BEAT_HIGH_BOUND),
+                );
                 *iinode.heart_beat_true.lock().unwrap() = 1;
                 thread::park_timeout(rand_sleep);
-                if *iinode.shutdown.lock().unwrap() == true { //关闭
+                if *iinode.shutdown.lock().unwrap() == true {
+                    //关闭
                     my_debug!("id:{} shutdown append_thread ", iinode.get_id());
                     break;
                 }
-                if iinode.is_leader() && *iinode.heart_beat_true.lock().unwrap() == 1 { //心跳，广播,发送包和心跳一样
+                if iinode.is_leader() && *iinode.heart_beat_true.lock().unwrap() == 1 {
+                    //心跳，广播,发送包和心跳一样
                     Node::send_followers_append_entries(iinode.clone());
                 }
             }
-
         });
         *inode.append_thread.lock().unwrap() = Some(athread);
     }
 
-    pub fn send_followers_append_entries(inode: Node) { //广播包或者心跳
+    pub fn send_followers_append_entries(inode: Node) {
+        //广播包或者心跳
         if !inode.is_leader() {
             return;
         }
@@ -875,8 +953,10 @@ impl Node {
             peers = inode.raft.lock().unwrap().get_peers();
         }
         let next_index = match inode.get_next_index() {
-            Some(index) => index ,
-            None => { return; },
+            Some(index) => index,
+            None => {
+                return;
+            }
         };
         my_debug!("leader:{} next_index:{:?}", id, next_index);
         //let (send, recv) = mpsc::channel();
@@ -899,7 +979,7 @@ impl Node {
                 leader_commit: inode.get_commit_index(),
             };
             let entry = inode.get_log(args.prev_log_index); //一定可得到entry,可unwrap()
-            args.prev_log_term = entry.unwrap().term;  
+            args.prev_log_term = entry.unwrap().term;
             for j in 0..MAX_SEND_ENTRIES {
                 let entry_next = inode.get_log(next_index[i] + j);
                 match entry_next {
@@ -907,10 +987,10 @@ impl Node {
                         let mut dat = vec![];
                         let _ret = labcodec::encode(&en, &mut dat).map_err(Error::Encode);
                         args.entries.push(dat);
-                    },
+                    }
                     None => {
                         break;
-                    },
+                    }
                 }
             }
             let peer = peers[i].clone();
@@ -920,36 +1000,50 @@ impl Node {
                 let ret = peer.append_entries(&args).map_err(Error::Rpc).wait();
                 match ret {
                     Ok(rep) => {
-                        if rep.success  {
+                        if rep.success {
                             //*result.lock().unwrap() = 1;
                             if rep.term == iinode.term() {
                                 iinode.handle_append_reply(i as u64, 1, rep.next_index);
-
                             }
                             let time2 = time.elapsed().as_millis();
-                            my_debug!("leader:{} do heart beat:{} success time:{}ms! ", leader_id, i, time2);
-                        }
-                        else {
+                            my_debug!(
+                                "leader:{} do heart beat:{} success time:{}ms! ",
+                                leader_id,
+                                i,
+                                time2
+                            );
+                        } else {
                             //*result.lock().unwrap() = 0;
-                            if rep.term > iinode.term() {  //发现存在比自己任期大的节点
-                                my_debug!("leader:[{}:{}] set_follow because id:{} bigger term:{}", leader_id, iinode.term(), i, rep.term);
+                            if rep.term > iinode.term() {
+                                //发现存在比自己任期大的节点
+                                my_debug!(
+                                    "leader:[{}:{}] set_follow because id:{} bigger term:{}",
+                                    leader_id,
+                                    iinode.term(),
+                                    i,
+                                    rep.term
+                                );
                                 iinode.set_state(rep.term, false, false);
                                 iinode.set_votefor(None);
                                 iinode.reset_timeout_thread();
-                            }
-                            else {
+                            } else {
                                 if rep.term == iinode.term() {
                                     iinode.handle_append_reply(i as u64, 0, rep.next_index);
                                 }
                             }
                             let time2 = time.elapsed().as_millis();
-                            my_debug!("leader:{} do heart beat:{} failed time:{}ms!", leader_id, i, time2);
-                        } 
-                    },
+                            my_debug!(
+                                "leader:{} do heart beat:{} failed time:{}ms!",
+                                leader_id,
+                                i,
+                                time2
+                            );
+                        }
+                    }
                     Err(_) => {
                         //let time2 = time.elapsed().as_millis();
                         //my_debug!("leader:{} do heart beat:{} error time:{}ms! ", leader_id, i, time2);
-                    },
+                    }
                 }
                 //let _ret = tsend.send(1);
             });
@@ -981,11 +1075,10 @@ impl Node {
             inode.update_next_and_match(new_next_match); //更新next_index和match_index
 
         }*/
-        
+
         //thread::sleep(Duration::from_millis(5));
         /*let time2 = time.elapsed().as_millis();
         my_debug!("leader:{} append time:{}ms", inode.get_id(), time2);*/
-
     }
 
     pub fn reset_append_thread(&self) {
@@ -1033,8 +1126,7 @@ impl Node {
             let ret = self.raft.lock().unwrap().start(command);
             //self.reset_append_thread_heart_beat();
             ret
-        }
-        else {
+        } else {
             Err(Error::NotLeader)
         }
         // Your code here.
@@ -1112,7 +1204,7 @@ impl Node {
     }
 
     pub fn get_commit_index(&self) -> u64 {
-        self.raft.lock().unwrap().get_commit_index() 
+        self.raft.lock().unwrap().get_commit_index()
     }
 
     pub fn delete_log(&self, save_index: u64) {
@@ -1150,15 +1242,15 @@ impl Node {
         match *self.send.lock().unwrap() {
             Some(ref send) => {
                 let _ret = send.send(1);
-            },
-            None => {},
+            }
+            None => {}
         }
         for _ in 0..2 {
             self.reset_timeout_thread();
             self.reset_append_thread();
             thread::sleep(Duration::from_millis(TIMEOUT_HIGH_BOUND + 1));
         }
-        
+
         /*match vt {
             Some(thread) => {
                 thread.join().unwrap();
@@ -1179,8 +1271,6 @@ impl Node {
         self.timeout_thread.lock().unwrap().unwrap().join().unwrap();
         self.reset_append_thread();
         self.append_thread.lock().unwrap().unwrap().join().unwrap();*/
-
-
     }
 }
 
@@ -1189,26 +1279,28 @@ impl RaftService for Node {
     fn request_vote(&self, args: RequestVoteArgs) -> RpcFuture<RequestVoteReply> {
         // Your code here (2A, 2B).
         //my_debug!("id:{}:{} request_vote begin {:?}!", self.get_id(),self.term(), args);
-        let mut reply = RequestVoteReply{
+        let mut reply = RequestVoteReply {
             term: self.term(),
             vote_granted: false,
             //last_log_index: 0,
         };
         //my_debug!("id:{}:{} {}->{}!", self.get_id(),self.term(), self.get_last_log_term(), args.last_log_term);
         //my_debug!("id:{}:{} {}->{}!", self.get_id(),self.term(), self.get_last_log_index(), args.last_log_index);
-        if args.term <= self.term() { //term更小
+        if args.term <= self.term() {
+            //term更小
             reply.vote_granted = false;
-        }
-        else {
+        } else {
             //self.set_state(args.term, false, false);   //这里的term一定遇到更大的term，所以更新term
-            if args.last_log_term < self.get_last_log_term() as u64 {  //最后的日志的term更小
+            if args.last_log_term < self.get_last_log_term() as u64 {
+                //最后的日志的term更小
                 reply.vote_granted = false;
-            }
-            else if args.last_log_term == self.get_last_log_term() && args.last_log_index < self.get_last_log_index() as u64 { //最后的日志的term相同，但是个数更少
+            } else if args.last_log_term == self.get_last_log_term()
+                && args.last_log_index < self.get_last_log_index() as u64
+            {
+                //最后的日志的term相同，但是个数更少
                 reply.vote_granted = false;
-                //reply.last_log_index = self.get_last_log_index() as u64;
-            }
-            else {
+            //reply.last_log_index = self.get_last_log_index() as u64;
+            } else {
                 reply.vote_granted = true;
                 //self.set_state(args.term, false, false);
                 self.set_votefor(Some(args.candidate_id));
@@ -1217,7 +1309,6 @@ impl RaftService for Node {
             self.set_state(args.term, false, false);
             reply.term = self.term();
             self.reset_timeout_thread();
-
         }
         //my_debug!("id:{} request_vote {} end {:?}! ", self.get_id(), reply.vote_granted, reply);
         Box::new(futures::future::result(Ok(reply)))
@@ -1225,77 +1316,93 @@ impl RaftService for Node {
     }
 
     fn append_entries(&self, args: RequestEntryArgs) -> RpcFuture<RequestEntryReply> {
-        my_debug!("id:{} append_entries begin {:?}!", self.get_id(),args);
+        my_debug!("id:{} append_entries begin {:?}!", self.get_id(), args);
         let mut reply = RequestEntryReply {
             term: self.term(),
             success: false,
             next_index: 1,
         };
         if args.term < self.term() {
-            my_debug!("error:me[{}:{}] recv [{}:{}]", self.get_id(), self.term(), args.leader_id, args.term);
-        }
-        else {
+            my_debug!(
+                "error:me[{}:{}] recv [{}:{}]",
+                self.get_id(),
+                self.term(),
+                args.leader_id,
+                args.term
+            );
+        } else {
             //self.reset_timeout_thread();
             let entry = self.get_log(args.prev_log_index);
             match entry {
-                Some(en) => { //说明存在entry
-                    if en.term == args.prev_log_term {  //可以match成功，args.entries有用
-                        if args.entries.len() == 0 {  //说明是心跳
+                Some(en) => {
+                    //说明存在entry
+                    if en.term == args.prev_log_term {
+                        //可以match成功，args.entries有用
+                        if args.entries.len() == 0 {
+                            //说明是心跳
 
-                        }
-                        else {  //说明args.entries有效，
+                        } else {
+                            //说明args.entries有效，
                             for i in 0..args.entries.len() {
                                 let log_encode = args.entries[i].clone();
                                 match labcodec::decode(&log_encode) {
                                     Ok(log) => {
                                         let log: LogEntry = log;
-                                        let node_entry = self.get_log(args.prev_log_index + 1 + i as u64);
+                                        let node_entry =
+                                            self.get_log(args.prev_log_index + 1 + i as u64);
                                         match node_entry {
                                             Some(n_en) => {
-                                                if n_en == log { //log 相等，无需删除
+                                                if n_en == log {
+                                                    //log 相等，无需删除
                                                     continue;
-                                                }
-                                                else {
+                                                } else {
                                                     self.delete_log(args.prev_log_index + i as u64);
                                                     self.push_log(log.index, log.term, &log.entry);
                                                 }
-                                            },
+                                            }
                                             None => {
                                                 self.push_log(log.index, log.term, &log.entry);
                                             }
-
-
                                         }
-                                    },
+                                    }
                                     Err(e) => {
                                         panic!("{:?}", e);
-                                    },
-                                } 
+                                    }
+                                }
                             }
                         }
                         //进入这里，说明匹配成功，可以返回success
                         reply.success = true;
                         reply.next_index = args.prev_log_index + 1 + args.entries.len() as u64;
                         let can_commit = cmp::min(args.leader_commit, reply.next_index - 1);
-                        if can_commit > self.get_commit_index() {  //返回success,可提交commit
-                            let new_commit_index: u64 = cmp::min(can_commit, self.get_last_log_index() as u64);
+                        if can_commit > self.get_commit_index() {
+                            //返回success,可提交commit
+                            let new_commit_index: u64 =
+                                cmp::min(can_commit, self.get_last_log_index() as u64);
                             self.set_commit_index(new_commit_index);
                         }
-
+                    } else {
+                        //说明false，args.entries无用,并且当前节点的log[args.prev_log_index]有错，等到可以匹配后再一次删后面的所有
+                        my_debug!(
+                            "error:match fail me[{}:{}-{}:{}] recv [{}:{}-{}:{}]",
+                            self.get_id(),
+                            self.term(),
+                            self.get_last_log_index(),
+                            en.term,
+                            args.leader_id,
+                            args.term,
+                            args.prev_log_index,
+                            args.prev_log_term
+                        );
                     }
-                    else { //说明false，args.entries无用,并且当前节点的log[args.prev_log_index]有错，等到可以匹配后再一次删后面的所有
-                        my_debug!("error:match fail me[{}:{}-{}:{}] recv [{}:{}-{}:{}]", self.get_id(), self.term(), self.get_last_log_index(), en.term, args.leader_id, args.term, args.prev_log_index, args.prev_log_term);
-                    }
-
-                },
-                None => {},  //false,说明匹配失败，
+                }
+                None => {} //false,说明匹配失败，
             }
             //进行到这里，说明leader有效（一个term只有一个leader）
             self.set_state(args.term, false, false);
             self.set_votefor(None);
             reply.term = self.term();
             self.reset_timeout_thread();
-
         }
         my_debug!("id:{} append_entries end {:?}!", self.get_id(), reply);
         Box::new(futures::future::result(Ok(reply)))
