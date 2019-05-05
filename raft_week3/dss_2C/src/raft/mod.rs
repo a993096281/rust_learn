@@ -30,7 +30,7 @@ use self::config::Entry;
 #[macro_export]
 macro_rules! my_debug {
     ($($arg: tt)*) => (
-        //println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
+        println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
     )
 }
 
@@ -41,7 +41,7 @@ const HEART_BEAT_HIGH_BOUND: u64 = 100;
 
 
 //const BROADCAST_ERROR_WAIT_TIME: u64 = 10; //广播时接收reply，每个接收最多等待time ms，意味着如果有两个节点error，投票或者心跳接收会等待2*time ms，
-const MAX_SEND_ENTRIES: u64 = 100;  //一次最大可发送的entries
+const MAX_SEND_ENTRIES: u64 = 200;  //一次最大可发送的entries
 
 pub struct ApplyMsg {
     pub command_valid: bool,
@@ -686,7 +686,8 @@ impl Node {
                     my_debug!("id:{} shutdown timeout_thread ", iinode.get_id());
                     break;
                 }
-                if *iinode.timeout_true.lock().unwrap() == true { //超时，需要成为候选者
+                let time2 = time.elapsed().as_millis();
+                if *iinode.timeout_true.lock().unwrap() == true && time2 >= TIMEOUT_LOW_BOUND as u128 { //超时，需要成为候选者
                     let time2 = time.elapsed().as_millis();
                     my_debug!("id:{} vote_send time:{}ms timeout:{}",iinode.get_id(), time2 ,*iinode.timeout_true.lock().unwrap());
                     let _ret = vote_send.send(1); //发送成为候选者信号

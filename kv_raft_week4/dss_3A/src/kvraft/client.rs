@@ -18,7 +18,7 @@ pub struct Clerk {
     servers: Vec<service::KvClient>,
     // You will have to modify this struct.
     op_id: Arc<Mutex<u64>>,     //操作的id，从1开始
-    leader_id: Arc<Mutex<u64>>, //leader的id，默认为0,是否需要Arc有待思考，很可能影响多线程
+    leader_id: Arc<Mutex<usize>>, //leader的id，默认为0,是否需要Arc有待思考，很可能影响多线程
 }
 
 impl fmt::Debug for Clerk {
@@ -59,7 +59,7 @@ impl Clerk {
         };
         let mut leader = *self.leader_id.lock().unwrap();
         loop {
-            let ret = self.servers[leader as usize].get(&args.clone()).wait();
+            let ret = self.servers[leader].get(&args.clone()).wait();
             match ret {
                 Ok(reply) => {
                     //println!("clerk:{:?}", reply);
@@ -73,10 +73,11 @@ impl Clerk {
                     if !reply.wrong_leader {
                         //正常leader,
                         *self.leader_id.lock().unwrap() = leader;
-                    //thread::sleep(Duration::from_millis(100)); //等成功提交
+                        thread::sleep(Duration::from_millis(210)); //等成功提交
                     } else {
                         //错误leader
-                        leader = (leader + 1) % self.servers.len() as u64;
+                        leader = (leader + 1) % self.servers.len();
+                        thread::sleep(Duration::from_millis(110));
                     }
                 }
                 Err(_) => {
@@ -84,7 +85,7 @@ impl Clerk {
                 }
             }
             //leader = (leader + 1) % self.servers.len();
-            thread::sleep(Duration::from_millis(20));
+            //thread::sleep(Duration::from_millis(120));
         }
 
         //unimplemented!()
@@ -123,7 +124,7 @@ impl Clerk {
         };
         let mut leader = *self.leader_id.lock().unwrap();
         loop {
-            let ret = self.servers[leader as usize]
+            let ret = self.servers[leader]
                 .put_append(&args.clone())
                 .wait();
             match ret {
@@ -139,18 +140,20 @@ impl Clerk {
                     if !reply.wrong_leader {
                         //正常leader
                         *self.leader_id.lock().unwrap() = leader;
-                    //thread::sleep(Duration::from_millis(100)); //等成功提交
+                        thread::sleep(Duration::from_millis(210)); //等成功提交
                     } else {
                         //错误leader
-                        leader = (leader + 1) % self.servers.len() as u64;
+                        leader = (leader + 1) % self.servers.len();
+                        thread::sleep(Duration::from_millis(110));
                     }
                 }
                 Err(e) => {
-                    println!("clerk:{:?}", e);
+                    leader = (leader + 1) % self.servers.len();
+                    thread::sleep(Duration::from_millis(110));
                 }
             }
             //leader = (leader + 1) % self.servers.len();
-            thread::sleep(Duration::from_millis(120));
+            //thread::sleep(Duration::from_millis(120));
         }
 
         //unimplemented!()

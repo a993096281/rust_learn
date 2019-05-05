@@ -25,8 +25,8 @@ use rand::Rng;
 use std::cmp;
 use std::thread;
 use std::time::{Duration, Instant};
-//use self::config::Entry;
-use crate::kvraft::server::OpEntry as Entry;
+use self::config::Entry;
+//use crate::kvraft::server::OpEntry as Entry;
 
 #[macro_export]
 macro_rules! my_debug {
@@ -741,7 +741,8 @@ impl Node {
                     my_debug!("id:{} shutdown timeout_thread ", iinode.get_id());
                     break;
                 }
-                if *iinode.timeout_true.lock().unwrap() == true {
+                let time2 = time.elapsed().as_millis();
+                if *iinode.timeout_true.lock().unwrap() == true && time2 >= TIMEOUT_LOW_BOUND as u128{
                     //超时，需要成为候选者
                     let time2 = time.elapsed().as_millis();
                     my_debug!(
