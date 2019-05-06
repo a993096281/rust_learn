@@ -25,18 +25,18 @@ use rand::Rng;
 use std::cmp;
 use std::thread;
 use std::time::{Duration, Instant};
-//use self::config::Entry;
-use crate::kvraft::server::OpEntry as Entry;
+use self::config::Entry;
+//use crate::kvraft::server::OpEntry as Entry;
 
 #[macro_export]
 macro_rules! my_debug {
     ($($arg: tt)*) => (
-        println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
+        //println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
     )
 }
 
-const TIMEOUT_LOW_BOUND: u64 = 200;
-const TIMEOUT_HIGH_BOUND: u64 = 350;
+const TIMEOUT_LOW_BOUND: u64 = 250;
+const TIMEOUT_HIGH_BOUND: u64 = 400;
 const HEART_BEAT_LOW_BOUND: u64 = 95;
 const HEART_BEAT_HIGH_BOUND: u64 = 100;
 
@@ -111,7 +111,7 @@ impl LogEntry {
         }
     }
 }
-//保持所有状态
+//保持raft的所有状态
 #[derive(Clone, PartialEq, Message)]
 pub struct RaftState {
     //voted_for暂时觉得没必要保存
@@ -145,6 +145,7 @@ impl RaftState {
         }
     }
 }
+
 
 // A single Raft peer.
 pub struct Raft {
@@ -525,6 +526,26 @@ impl Raft {
         }
         let _ret = labcodec::encode(&raft_state, &mut data).map_err(Error::Encode);
         self.persister.save_raft_state(data);
+    }
+    pub fn save_snapshot(&self, data2: Vec<u8>) {
+        let mut data = vec![];
+        let mut raft_state = RaftState {
+            term: self.term(),
+            is_leader: self.is_leader(),
+            is_candidate: self.is_candidate(),
+            commit_index: self.commit_index,
+            last_applied: self.last_applied,
+            logs: vec![],
+        };
+        for i in 1..self.log.len() {
+            //从1开始，不保存index为0的空log
+            let mut dat = vec![];
+            let log = self.log[i].clone();
+            let _ret = labcodec::encode(&log, &mut dat).map_err(Error::Encode);
+            raft_state.logs.push(dat);
+        }
+        let _ret = labcodec::encode(&raft_state, &mut data).map_err(Error::Encode);
+        self.persister.save_state_and_snapshot(data, data2);
     }
 
     /// restore previously persisted state.
@@ -1134,6 +1155,9 @@ impl Node {
         // Example:
         // self.raft.start(command)
         //unimplemented!()
+    }
+    pub fn save_snapshot(&self, data: Vec<u8>) {
+        self.raft.lock().unwrap().save_snapshot(data);
     }
 
     /// The current term of this peer.

@@ -14,21 +14,23 @@ use std::sync::{Arc, Mutex};
 #[macro_export]
 macro_rules! kv_debug {
     ($($arg: tt)*) => (
-        println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
+        //println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
     )
 }
 
 const WAIT_CHECK_TIME: u64 = 100; //单位秒
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Message)]
 pub struct LatestReply {
+    #[prost(uint64, tag = "1")]
     pub seq: u64,      //请求seq
-    //pub result: i32,   // -1代表失效，0代表等待raft，1代表成功
+
+    #[prost(string, tag = "2")]
     pub value: String, //get操作时的结果
 }
 
 #[derive(Clone, PartialEq, Message)]
-pub struct OpEntry {
+pub struct OpEntry { //日志结构
     #[prost(uint64, tag = "1")]
     pub seq: u64, //操作的id
     #[prost(string, tag = "2")]
@@ -39,6 +41,21 @@ pub struct OpEntry {
     pub key: String, //
     #[prost(string, tag = "5")]
     pub value: String, //
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct Snapshot {  //保存快照结构
+    #[prost(bytes, repeated, tag = "1")]
+    pub db_key: Vec<Vec<u8>>,  
+
+    #[prost(bytes, repeated, tag = "2")]
+    pub db_value: Vec<Vec<u8>>,  
+
+    #[prost(bytes, repeated, tag = "3")]
+    pub latest_requests_key: Vec<Vec<u8>>,
+
+    #[prost(bytes, repeated, tag = "4")]
+    pub latest_requests_value: Vec<Vec<u8>>,
 }
 
 pub struct KvServer {
@@ -62,11 +79,11 @@ impl KvServer {
         maxraftstate: Option<usize>,
     ) -> KvServer {
         // You may need initialization code here.
-
+        let snapshot = persister.snapshot();
         let (tx, apply_ch) = unbounded();
         let rf = raft::Raft::new(servers, me, persister, tx);
 
-        KvServer {
+        let mut kvserver = KvServer {
             me,
             maxraftstate,
             rf: raft::Node::new(rf),
@@ -74,10 +91,107 @@ impl KvServer {
             db: HashMap::new(),
             //ack: HashMap::new(),
             latest_requests: HashMap::new(),
-        }
+        };
+        kvserver.read_snapshot(snapshot);
+        kvserver
     }
     pub fn get_state(&self) -> raft::State {
         self.rf.get_state()
+    }
+    pub fn creat_snapshot(&self) -> Vec<u8> {
+        let mut data = vec![];
+        let mut snapshot = Snapshot {
+            db_key: vec![],
+            db_value: vec![],
+            latest_requests_key: vec![],
+            latest_requests_value: vec![],
+        };
+        for (key,value) in &self.db {
+            let mut db_key = vec![];
+            let mut db_value = vec![];
+            let _ret = labcodec::encode(&key.clone(), &mut db_key);
+            let _ret2 = labcodec::encode(&value.clone(), &mut db_value);
+            snapshot.db_key.push(db_key);
+            snapshot.db_value.push(db_value);
+        }
+        for (key,value) in &self.latest_requests {
+            let mut latest_requests_key = vec![];
+            let mut latest_requests_value = vec![];
+            let _ret = labcodec::encode(&key.clone(), &mut latest_requests_key);
+            let _ret2 = labcodec::encode(&value.clone(), &mut latest_requests_value);
+            snapshot.latest_requests_key.push(latest_requests_key);
+            snapshot.latest_requests_value.push(latest_requests_value);
+        }
+        let _ret = labcodec::encode(&snapshot, &mut data);
+        data
+    }
+    pub fn read_snapshot(&mut self, data: Vec<u8>) {
+        if data.is_empty() {
+            return;
+        }
+        match labcodec::decode(&data) {
+            Ok(snapshot) => {
+                let snapshot: Snapshot = snapshot;
+                self.db.clear();
+                self.latest_requests.clear();
+                for i in 0..snapshot.db_key.len() {
+                    let mut db_key: String;
+                    let mut db_value: String;
+                    match labcodec::decode(&snapshot.db_key[i].clone()) {
+                        Ok(key) => {
+                            let key: String = key;
+                            db_key = key.clone();
+                        },
+                        Err(e) => {
+                            panic!("{:?}", e);
+                        },
+                    }
+                    match labcodec::decode(&snapshot.db_value[i].clone()) {
+                        Ok(value) => {
+                            let value: String = value;
+                            db_value = value.clone();
+                        },
+                        Err(e) => {
+                            panic!("{:?}", e);
+                        },
+                    }
+                    self.db.insert(db_key.clone(), db_value.clone());
+                    kv_debug!("server:{} read snapshot db:{}:{}", self.me, db_key, db_value);
+
+                }
+                for i in 0..snapshot.latest_requests_key.len() {
+                    let mut latest_requests_key: String;
+                    let mut latest_requests_value: LatestReply;
+                    match labcodec::decode(&snapshot.latest_requests_key[i].clone()) {
+                        Ok(key) => {
+                            let key: String = key;
+                            latest_requests_key = key.clone();
+                        },
+                        Err(e) => {
+                            panic!("{:?}", e);
+                        },
+                    }
+                    match labcodec::decode(&snapshot.latest_requests_value[i].clone()) {
+                        Ok(value) => {
+                            let value: LatestReply = value;
+                            latest_requests_value = value.clone();
+                        },
+                        Err(e) => {
+                            panic!("{:?}", e);
+                        },
+                    }
+                    self.latest_requests.insert(latest_requests_key.clone(), latest_requests_value.clone());
+                    kv_debug!("server:{} read snapshot db:{}:{:?}", self.me, latest_requests_key, latest_requests_value);
+                }
+            },
+            Err(e) => {
+                panic!("{:?}", e);
+            },
+        }
+    }
+    pub fn save_snapshot(&self) {
+        let data = self.creat_snapshot();
+        self.rf.save_snapshot(data);
     }
 }
 
@@ -184,6 +298,7 @@ impl Node {
                                 continue;
                             }
                         }
+                        server.save_snapshot();
                     }
                     
                     /*if let Some(client_name) = server.ack.get(&command_index) {

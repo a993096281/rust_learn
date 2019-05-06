@@ -277,7 +277,7 @@ fn generic_test(
             ));
         }
         thread::sleep(Duration::from_secs(5));
-        println!("sleep 5s");
+        //println!("sleep 5s");
         // tell clients to quit
         done_clients.store(1, Ordering::Relaxed);
         // tell partitioner to quit
@@ -478,7 +478,7 @@ fn generic_test_linearizability(
             ));
         }
         thread::sleep(Duration::from_secs(5));
-
+        //println!("sleep 5s");
         // tell clients to quit
         done_clients.store(1, Ordering::Relaxed);
         // tell partitioner to quit
@@ -486,7 +486,7 @@ fn generic_test_linearizability(
 
         if partitions {
             debug!("wait for partitioner");
-            partitioner_rx.try_recv().unwrap();
+            partitioner_rx.recv().unwrap();
             // reconnect network and submit a request. A client may
             // have submitted a request in a minority.  That request
             // won't return until that server discovers a new term
