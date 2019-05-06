@@ -25,8 +25,8 @@ use rand::Rng;
 use std::cmp;
 use std::thread;
 use std::time::{Duration, Instant};
-use self::config::Entry;
-//use crate::kvraft::server::OpEntry as Entry;
+//use self::config::Entry;
+use crate::kvraft::server::OpEntry as Entry;
 
 #[macro_export]
 macro_rules! my_debug {

@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+const TIMEOUT_WAIT_RAFT: u64 = 220;  //等raft的apply
+const TIMEOUT_WAIT_NEXT_LEADER: u64 = 110;  //错误leader时，重发等待时间
+
 enum Op {
     Put(String, String),
     Append(String, String),
@@ -73,15 +76,16 @@ impl Clerk {
                     if !reply.wrong_leader {
                         //正常leader,
                         *self.leader_id.lock().unwrap() = leader;
-                        thread::sleep(Duration::from_millis(210)); //等成功提交
+                        thread::sleep(Duration::from_millis(TIMEOUT_WAIT_RAFT)); //等成功提交
                     } else {
                         //错误leader
                         leader = (leader + 1) % self.servers.len();
-                        thread::sleep(Duration::from_millis(110));
+                        thread::sleep(Duration::from_millis(TIMEOUT_WAIT_NEXT_LEADER));
                     }
                 }
                 Err(_) => {
-                    println!("clerk:");
+                    leader = (leader + 1) % self.servers.len();
+                    thread::sleep(Duration::from_millis(TIMEOUT_WAIT_NEXT_LEADER));
                 }
             }
             //leader = (leader + 1) % self.servers.len();
@@ -140,16 +144,16 @@ impl Clerk {
                     if !reply.wrong_leader {
                         //正常leader
                         *self.leader_id.lock().unwrap() = leader;
-                        thread::sleep(Duration::from_millis(210)); //等成功提交
+                        thread::sleep(Duration::from_millis(TIMEOUT_WAIT_RAFT)); //等成功提交
                     } else {
                         //错误leader
                         leader = (leader + 1) % self.servers.len();
-                        thread::sleep(Duration::from_millis(110));
+                        thread::sleep(Duration::from_millis(TIMEOUT_WAIT_NEXT_LEADER));
                     }
                 }
                 Err(e) => {
                     leader = (leader + 1) % self.servers.len();
-                    thread::sleep(Duration::from_millis(110));
+                    thread::sleep(Duration::from_millis(TIMEOUT_WAIT_NEXT_LEADER));
                 }
             }
             //leader = (leader + 1) % self.servers.len();

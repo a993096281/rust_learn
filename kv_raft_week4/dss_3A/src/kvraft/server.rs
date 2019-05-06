@@ -23,7 +23,7 @@ const WAIT_CHECK_TIME: u64 = 100; //单位秒
 #[derive(Clone, PartialEq, Debug)]
 pub struct LatestReply {
     pub seq: u64,      //请求seq
-    pub result: i32,   // -1代表失效，0代表等待raft，1代表成功
+    //pub result: i32,   // -1代表失效，0代表等待raft，1代表成功
     pub value: String, //get操作时的结果
 }
 
@@ -50,8 +50,8 @@ pub struct KvServer {
     pub apply_ch: UnboundedReceiver<raft::ApplyMsg>,
 
     pub db: HashMap<String, String>,                   //数据库存储
-    pub ack: HashMap<u64, (String, u64)>,                // 日志index <-> (client_name,seq)
-    pub latest_requests: HashMap<String, HashMap<u64, LatestReply>>, //client_name <-> (请求seq <-> 回复;对应客户端的最新回复)
+    //pub ack: HashMap<u64, (String, u64)>,                // 日志index <-> (client_name,seq)
+    pub latest_requests: HashMap<String, LatestReply>, //client_name <-> ( 回复;对应客户端的最新回复)
 }
 
 impl KvServer {
@@ -72,7 +72,7 @@ impl KvServer {
             rf: raft::Node::new(rf),
             apply_ch,
             db: HashMap::new(),
-            ack: HashMap::new(),
+            //ack: HashMap::new(),
             latest_requests: HashMap::new(),
         }
     }
@@ -146,13 +146,11 @@ impl Node {
                     );
                     let mut server = inode.server.lock().unwrap();
                     if server.latest_requests.get(&_entr.client_name).is_none()
-                        || server.latest_requests.get(&_entr.client_name).unwrap().get(&_entr.seq).is_none()
-                        || server.latest_requests.get(&_entr.client_name).unwrap().get(&_entr.seq).unwrap().result != 1
+                        || server.latest_requests.get(&_entr.client_name).unwrap().seq < _entr.seq
                     {
                         //可更新
                         let mut lre = LatestReply {
                             seq: _entr.seq,
-                            result: 1,
                             value: String::new(),
                         };
                         match _entr.op {
@@ -161,19 +159,13 @@ impl Node {
                                 if server.db.get(&_entr.key).is_some() {
                                     lre.value = server.db.get(&_entr.key).unwrap().clone();
                                 }
-                                if server.latest_requests.get(&_entr.client_name).is_none() {
-                                    server.latest_requests.insert(_entr.client_name.clone(), HashMap::new());
-                                }
-                                server.latest_requests.get_mut(&_entr.client_name).unwrap().insert(_entr.seq, lre.clone());
+                                server.latest_requests.insert(_entr.client_name.clone(), lre.clone());
                                 kv_debug!("server:{} client:{} apply:{:?}", server.me, _entr.client_name, lre);
                             }
                             2 => {
                                 //put
                                 server.db.insert(_entr.key.clone(), _entr.value.clone());
-                                if server.latest_requests.get(&_entr.client_name).is_none() {
-                                    server.latest_requests.insert(_entr.client_name.clone(), HashMap::new());
-                                }
-                                server.latest_requests.get_mut(&_entr.client_name).unwrap().insert(_entr.seq, lre.clone());
+                                server.latest_requests.insert(_entr.client_name.clone(), lre.clone());
                                 kv_debug!("server:{} client:{} apply:{:?}", server.me, _entr.client_name, lre);
                             }
                             3 => {
@@ -183,10 +175,7 @@ impl Node {
                                 } else {
                                     server.db.insert(_entr.key.clone(), _entr.value.clone());
                                 }
-                                if server.latest_requests.get(&_entr.client_name).is_none() {
-                                    server.latest_requests.insert(_entr.client_name.clone(), HashMap::new());
-                                }
-                                server.latest_requests.get_mut(&_entr.client_name).unwrap().insert(_entr.seq, lre.clone());
+                                server.latest_requests.insert(_entr.client_name.clone(), lre.clone());
                                 kv_debug!("server:{} client:{} apply:{:?}", server.me, _entr.client_name, lre);
                             }
                             _ => {
@@ -196,16 +185,7 @@ impl Node {
                             }
                         }
                     }
-                    let mut client_name = _entr.client_name.clone();
-                    let mut seq = _entr.seq;
-                    if server.ack.get(&command_index).is_some() {
-                        client_name = server.ack.get(&command_index).unwrap().0.clone();
-                        seq = server.ack.get(&command_index).unwrap().1;
-                    }
-                    if client_name != _entr.client_name {
-                        server.latest_requests.get_mut(&client_name.clone()).unwrap().get_mut(&seq).unwrap().result = -1;
-                    }
-                    server.ack.remove(&command_index);
+                    
                     /*if let Some(client_name) = server.ack.get(&command_index) {
                         //需要校验
                         /*if *client_name != _entr.client_name {
@@ -270,26 +250,23 @@ impl KvService for Node {
         {
             //锁住
             //kv_debug!("server:{} get for lock()", self.get_id());
-            let mut server = self.server.lock().unwrap();
+            let server = self.server.lock().unwrap();
             //kv_debug!("server:{} get lock()", self.get_id());
             //thread::sleep(Duration::from_millis(300));
-            if server.latest_requests.get(&arg.client_name).is_some() {
+            if let Some(re) = server.latest_requests.get(&arg.client_name)  {
                 //该客户端的回复
-                let hashmap = server.latest_requests.get_mut(&arg.client_name).unwrap();
-                if let Some(re) = hashmap.get(&arg.seq) {
-                    if re.result == 1 {  //可返回结果
-                        reply.wrong_leader = false;
-                        reply.err = String::from("OK");
-                        reply.value = re.value.clone();
-                        kv_debug!("server:{} client:{} get reply:{:?}", self.get_id(), arg.client_name, reply);
-                        return Box::new(futures::future::result(Ok(reply)));
-                    }
-                    else if re.result == 0 { //等待raft
-                        reply.wrong_leader = false;
-                        
-                        kv_debug!("server:{} client:{} get wait reply:{:?}", self.get_id(), arg.client_name, reply);
-                        return Box::new(futures::future::result(Ok(reply)));
-                    }
+                if arg.seq < re.seq {
+                    reply.wrong_leader = true;
+                    reply.err = String::from("old seq");
+                    kv_debug!("kverror:server:{}:{} client:{}:{} get reply:{:?}", self.get_id(), re.seq, arg.client_name, arg.seq, reply);
+                    return Box::new(futures::future::result(Ok(reply)));
+                }
+                else if arg.seq == re.seq {  //可直接返回结果
+                    reply.wrong_leader = false;
+                    reply.err = String::from("OK");
+                    reply.value = re.value.clone();
+                    kv_debug!("server:{} client:{} get reply:{:?}", self.get_id(), arg.client_name, reply);
+                    return Box::new(futures::future::result(Ok(reply)));
                 }
                 
             }
@@ -306,16 +283,7 @@ impl KvService for Node {
                     //index = index1;
                     //term = term1;
                     //server.ack.entry(index).or_insert(send);
-                    server.ack.insert(index1, (arg.client_name.clone(), arg.seq));
-                    let lre = LatestReply {
-                            seq: arg.seq,
-                            result: 0,
-                            value: String::new(),
-                    };
-                    if server.latest_requests.get(&arg.client_name).is_none() {
-                        server.latest_requests.insert(arg.client_name.clone(), HashMap::new());
-                    }
-                    server.latest_requests.get_mut(&arg.client_name).unwrap().insert(arg.seq, lre.clone());
+                    //server.ack.insert(index1, (arg.client_name.clone(), arg.seq));
                     reply.wrong_leader = false;
                     kv_debug!("server:{} client:{} start:{:?}", self.get_id(), arg.client_name, cmd);
                     //kv_debug!("server:{} client:{} get start reply:{:?}", self.get_id(), arg.client_name, reply);
@@ -324,7 +292,6 @@ impl KvService for Node {
                 }
                 Err(_) => {
                     reply.wrong_leader = true;
-                    reply.err = String::from("");
                     return Box::new(futures::future::result(Ok(reply)));
                 }
             }
@@ -388,26 +355,22 @@ impl KvService for Node {
         {
             //锁住
             //kv_debug!("server:{} putappend for lock()", self.get_id());
-            let mut server = self.server.lock().unwrap();
+            let server = self.server.lock().unwrap();
             //kv_debug!("server:{} putappend lock()", self.get_id());
             //thread::sleep(Duration::from_millis(300));
-            if server.latest_requests.get(&arg.client_name).is_some() {
+            if let Some(re) = server.latest_requests.get(&arg.client_name) {
                 //该客户端的回复
-                let hashmap = server.latest_requests.get_mut(&arg.client_name).unwrap();
-                if let Some(re) = hashmap.get(&arg.seq) {
-                    if re.result == 1{
-                        //可直接返回结果
-                        reply.wrong_leader = false;
-                        reply.err = String::from("OK");
-                        kv_debug!("server:{} client:{} putappend reply:{:?}", self.get_id(), arg.client_name, reply);
-                        return Box::new(futures::future::result(Ok(reply)));
-                    }
-                    else if re.result == 0 {
-                        reply.wrong_leader = false;
-                        
-                        kv_debug!("server:{} client:{} putappend wait reply:{:?}", self.get_id(), arg.client_name, reply);
-                        return Box::new(futures::future::result(Ok(reply)));
-                    }
+                if arg.seq < re.seq {
+                    reply.wrong_leader = true;
+                    reply.err = String::from("OK");
+                    kv_debug!("kverror:server:{}:{} client:{}:{} putappend reply:{:?}", self.get_id(), re.seq, arg.client_name, arg.seq, reply);
+                    return Box::new(futures::future::result(Ok(reply)));
+                }
+                else if arg.seq == re.seq {
+                    reply.wrong_leader = false;
+                    reply.err = String::from("OK");
+                    kv_debug!("server:{} client:{} putappend reply:{:?}", self.get_id(), arg.client_name, reply);
+                    return Box::new(futures::future::result(Ok(reply)));
                 }
 
             }
@@ -425,16 +388,7 @@ impl KvService for Node {
                     //term = term1;
                     //server.ack.entry(index).or_insert(send);
                     //server.ack.insert(index, send);
-                    server.ack.insert(index1, (arg.client_name.clone(), arg.seq));
-                    let lre = LatestReply {
-                            seq: arg.seq,
-                            result: 0,
-                            value: String::new(),
-                    };
-                    if server.latest_requests.get(&arg.client_name).is_none() {
-                        server.latest_requests.insert(arg.client_name.clone(), HashMap::new());
-                    }
-                    server.latest_requests.get_mut(&arg.client_name).unwrap().insert(arg.seq, lre.clone());
+                    //server.ack.insert(index1, (arg.client_name.clone(), arg.seq));
                     reply.wrong_leader = false;
                     kv_debug!("server:{} client:{} start:{:?}", self.get_id(), arg.client_name, cmd);
                     //kv_debug!("server:{} client:{} get start reply:{:?}", self.get_id(), arg.client_name, reply);
