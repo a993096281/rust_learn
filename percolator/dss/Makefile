@@ -32,3 +32,7 @@ test_others:
 
 test_percolator:
 	RUST_LOG=${LOG_LEVEL} cargo test -p percolator -- --nocapture
+
+test_percolator_%:
+	RUST_LOG=${LOG_LEVEL} cargo test -p percolator -- --nocapture --test $*
+
