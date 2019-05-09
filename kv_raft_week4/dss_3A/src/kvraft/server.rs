@@ -10,7 +10,7 @@ use std::collections::HashMap;
 //use std::sync::mpsc;
 //se std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-//use std::time::Duration;
+//use std::time::Instant;
 #[macro_export]
 macro_rules! kv_debug {
     ($($arg: tt)*) => (
@@ -214,6 +214,8 @@ pub struct Node {
     // Your definitions here.
     pub me: usize,
     pub server: Arc<Mutex<KvServer>>,
+    apply_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+    shutdown: Arc<Mutex<bool>>,
 }
 
 impl Node {
@@ -222,6 +224,8 @@ impl Node {
         let node = Node {
             me: kv.me,
             server: Arc::new(Mutex::new(kv)),
+            apply_thread: Arc::new(Mutex::new(None)),
+            shutdown: Arc::new(Mutex::new(false))
         };
         let inode = node.clone();
         /*let apply_ch = node.server.lock().unwrap().apply_ch.clone();
@@ -230,8 +234,15 @@ impl Node {
 
         })
         .map_err(move |e| println!("error: apply stopped: {:?}", e));*/
-        thread::spawn(move || {
+        let apply_thread = thread::spawn(move || {
+            //let now = Instant::now();
             loop {
+                if *inode.shutdown.lock().unwrap() == true {
+                    kv_debug!("server:{} shutdown apply",inode.get_id());
+                    break;
+                }
+                //let time2 = now.elapsed().as_millis();
+                //println!("server:{} time2:{}", inode.get_id(), time2);
                 if let Ok(Async::Ready(Some(apply_msg))) =
                     futures::executor::spawn(futures::lazy(|| {
                         inode.server.lock().unwrap().apply_ch.poll()
@@ -316,6 +327,7 @@ impl Node {
                     kv_debug!("cmd:{:?}", apply_msg);
             }*/
         });
+        *node.apply_thread.lock().unwrap() = Some(apply_thread);
         node
     }
 
@@ -326,6 +338,11 @@ impl Node {
     pub fn kill(&self) {
         // Your code here, if desired.
         self.server.lock().unwrap().rf.kill();
+        *self.shutdown.lock().unwrap() = true;
+        let apply_thread = self.apply_thread.lock().unwrap().take();
+        if apply_thread.is_some() {
+            let _ = apply_thread.unwrap().join();
+        }
     }
 
     /// The current term of this peer.
