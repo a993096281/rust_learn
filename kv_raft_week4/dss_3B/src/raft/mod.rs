@@ -21,11 +21,12 @@ use rand::Rng;
 use std::cmp;
 use std::thread;
 use std::time::{Duration, Instant};
-use self::config::Entry;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
-//use crate::kvraft::server::OpEntry as Entry;
+
+use self::config::Entry;  //raft测试的输入日志
+//use crate::kvraft::server::OpEntry as Entry;  //kv_raft测试的输入日志
 
 #[macro_export]
 macro_rules! my_debug {
@@ -44,6 +45,8 @@ pub struct ApplyMsg {
     pub command_valid: bool,
     pub command: Vec<u8>,
     pub command_index: u64,
+    pub is_snapshot: bool,  //是否是snapshot操作，kv_raft才会用到
+    pub snapshot: Vec<u8>,  //是snapshot操作时，snapshot的数据
 }
 
 /// State of a raft peer.
@@ -125,20 +128,14 @@ pub struct RaftState {
     #[prost(uint64, tag = "5")]
     pub last_applied: u64,
 
-    #[prost(bytes, repeated, tag = "6")]
+    #[prost(uint64, tag = "6")]
+    pub snapshot_index: u64,
+
+    #[prost(uint64, tag = "7")]
+    pub snapshot_term: u64,
+
+    #[prost(bytes, repeated, tag = "8")]
     pub logs: Vec<Vec<u8>>,
-}
-impl RaftState {
-    fn new() -> Self {
-        RaftState {
-            term: 0,
-            is_leader: false,
-            is_candidate: false,
-            commit_index: 0,
-            last_applied: 0,
-            logs: vec![],
-        }
-    }
 }
 
 // A single Raft peer.
@@ -157,6 +154,9 @@ pub struct Raft {
     pub last_applied: u64, //最后被应用到状态机的日志条目索引值，增加Option主要是开始为None，值为log下标索引
     pub next_index: Option<Vec<u64>>, //对于每一个服务器，需要发送给他的下一个日志条目的索引值
     pub match_index: Option<Vec<u64>>, //对于每一个服务器，已经复制给他的日志的最高索引值
+
+    pub snapshot_index: u64,    //kv_raft用到
+    pub snapshot_term: u64,     //kv_raft用到
 
     // Your data here (2A, 2B, 2C).
     // Look at the paper's Figure 2 for a description of what
@@ -193,6 +193,8 @@ impl Raft {
             last_applied: 0,
             next_index: None,
             match_index: None,
+            snapshot_index: 0,
+            snapshot_term: 0,
         };
 
         // initialize from state persisted before a crash
@@ -249,8 +251,9 @@ impl Raft {
         self.peers.len()
     }
 
-    pub fn get_log(&self, index: u64) -> Option<LogEntry> {
-        if ((self.log.len() - 1) as u64) < index {
+    pub fn get_log(&self, index: u64) -> Option<LogEntry> {  //index是日志的index
+        let index = index - self.snapshot_index;
+        if ((self.log.len() - 1) as u64) < index {   //log的index不够
             None
         } else {
             Some(self.log[index as usize].clone())
@@ -357,6 +360,8 @@ impl Raft {
                     command_valid: true,
                     command: self.log[self.last_applied as usize].entry.clone(),
                     command_index: self.last_applied,
+                    is_snapshot: false,
+                    snapshot: vec![],
                 };
                 let _ret = self.apply_ch.unbounded_send(mesg);
                 my_debug!("id:{} apply_ch:[{}]", self.me, self.last_applied);
@@ -394,8 +399,9 @@ impl Raft {
         );
     }
 
-    pub fn delete_log(&mut self, save_index: u64) {
+    pub fn delete_log(&mut self, save_index: u64) {  //save_index是日志的index
         //删除save_index后面的log，save_index不删除
+        let save_index = save_index - self.snapshot_index;  //vector数组的index
         if ((self.log.len() - 1) as u64) < save_index {
             return;
         }
@@ -420,6 +426,50 @@ impl Raft {
         }
     }
 
+    pub fn delete_prev_log(&mut self, save_index: u64) {  //save_index是日志的index
+        //删除save_index前面的log，save_index不删除
+        let save_index = save_index - self.snapshot_index;  //vector数组的index
+        if ((self.log.len() - 1) as u64) < save_index {  //log不够，
+            my_debug!("error:id:{} delete prev log save_index:{} snapshot_index:{} log:{}",
+                self.me, save_index, self.snapshot_index, self.log.len());
+            return;
+        }
+        let _delete: Vec<LogEntry> = self.log.drain(..(save_index as usize)).collect();
+        for de in &_delete {
+            let entry = de.entry.clone();
+            let mut _entr: Option<Entry> = None;
+            match labcodec::decode(&entry) {
+                Ok(en) => {
+                    _entr = Some(en);
+                }
+                Err(e) => {}
+            }
+            my_debug!(
+                "id:{} delete prev log:[{}:{}:{:?}]",
+                self.me,
+                de.index,
+                de.term,
+                _entr
+            );
+        }
+    }
+
+    pub fn check_and_do_compress_log(&mut self, maxraftstate: usize, index: u64) {
+        if maxraftstate > self.persister.raft_state().len() {  //未超过，无需压缩日志
+            return;
+        }
+        if index > self.commit_index || index <= self.snapshot_index {
+            my_debug!("error:id:{} compress_log error index:{} commit:{} snapshot:{}",
+                self.me, self.commit_index, self.snapshot_index);
+            return;
+        }
+        self.delete_prev_log(index);  //删除index之前的日志
+        self.snapshot_index = index;
+        self.snapshot_term = self.log[0].term;
+        self.persist();  //无需保存snapshot，因为kv_server前面保存了
+
+    }
+
     /// save Raft's persistent state to stable storage,
     /// where it can later be retrieved after a crash and restart.
     /// see paper's Figure 2 for a description of what should be persistent.
@@ -436,6 +486,8 @@ impl Raft {
             is_candidate: self.is_candidate(),
             commit_index: self.commit_index,
             last_applied: self.last_applied,
+            snapshot_index: self.snapshot_index,
+            snapshot_term: self.snapshot_term,
             logs: vec![],
         };
         for i in 1..self.log.len() {
@@ -448,7 +500,7 @@ impl Raft {
         let _ret = labcodec::encode(&raft_state, &mut data).map_err(Error::Encode);
         self.persister.save_raft_state(data);
     }
-    pub fn save_snapshot(&self, data2: Vec<u8>) {
+    pub fn save_state_and_snapshot(&self, data2: Vec<u8>) {
         let mut data = vec![];
         let mut raft_state = RaftState {
             term: self.term(),
@@ -456,6 +508,8 @@ impl Raft {
             is_candidate: self.is_candidate(),
             commit_index: self.commit_index,
             last_applied: self.last_applied,
+            snapshot_index: self.snapshot_index,
+            snapshot_term: self.snapshot_term,
             logs: vec![],
         };
         for i in 1..self.log.len() {
@@ -467,6 +521,7 @@ impl Raft {
         }
         let _ret = labcodec::encode(&raft_state, &mut data).map_err(Error::Encode);
         self.persister.save_state_and_snapshot(data, data2);
+        //my_debug!("id:{} save_state_and_snapshot",self.me);
     }
 
     /// restore previously persisted state.
@@ -498,6 +553,8 @@ impl Raft {
                 self.state = restate;
                 self.commit_index = state.commit_index;
                 self.last_applied = state.last_applied;
+                self.snapshot_index = state.snapshot_index;
+                self.snapshot_term = state.snapshot_term;
 
                 my_debug!("id:{} restore state:{:?} num:{}", self.me, state, state.logs.len());
                 for i in 0..state.logs.len() {
@@ -782,7 +839,43 @@ impl Node {
             }
             let me = id;
             let iinode = inode.clone();
+            let peer = peers[i].clone();
+            let prev_log_index = next_index[i] - 1;
             let time = Instant::now();
+
+            if prev_log_index < raft.snapshot_index {  //需要发送snapshot,而不是append_entries
+                let args = SnapshotArgs {
+                    term: raft.term(),
+                    leader_id: id as u64,
+                    last_included_index: ratf.snapshot_index,
+                    last_included_term: raft.snapshot_term,
+                    snapshot: raft.persister.snapshot(),
+                };
+                thread::spawn(move || {
+                    my_debug!("leader:{} do snapshot:{} args:[term:{} snapshot_index:{} snapshot_term:{}] ", 
+                        me, i, args.term, args.last_included_index, args.last_included_term);
+                    let ret = peer.install_snapshot(&args).map_err(Error::Rpc).wait();
+                    match ret {
+                        Ok(rep) => {
+                            let mut raft = iinode.raft.lock().unwrap();
+                            if rep.term > raft.term() { //发现存在比自己任期大的节点
+                                my_debug!("leader:[{}:{}] set_follow because id:{} bigger term:{}",
+                                    me, raft.term(), i, rep.term);
+                                let _ret = iinode.time_reset.lock().unwrap().clone().unwrap().send(1);
+                                raft.set_state(rep.term, false, false);
+                            }
+                            if raft.is_leader() {  //还是leader，更新next_index,match_index
+                                raft.next_index.unwrap()[i] = args.last_included_index + 1;
+                                raft.match_index.unwrap()[i] = args.last_included_index;
+                                let time2 = time.elapsed().as_millis();
+                                my_debug!("leader:{} do snapshot:{} success time:{}ms! ", me, i, time2);
+                            }
+                        },
+                        Err(_) => {},
+                });
+                continue;
+            }
+
             let mut args = RequestEntryArgs {
                 term: raft.term(),
                 leader_id: id as u64,
@@ -810,7 +903,6 @@ impl Node {
                     }
                 }
             }
-            let peer = peers[i].clone();
             thread::spawn(move || {
                 my_debug!("leader:{} do heart beat:{} args:[term:{} prev_index:{} prev_term:{} commit:{} entry_num:{}] ", 
                 me, i, args.term, args.prev_log_index, args.prev_log_term, args.leader_commit, args.entries.len());
@@ -842,11 +934,7 @@ impl Node {
                             }
                             let time2 = time.elapsed().as_millis();
                             my_debug!(
-                                "leader:{} do heart beat:{} failed time:{}ms!",
-                                me,
-                                i,
-                                time2
-                            );
+                                "leader:{} do heart beat:{} failed time:{}ms!", me, i, time2);
                         }
                     }
                     Err(_) => {
@@ -859,8 +947,12 @@ impl Node {
 
     }
 
-    pub fn save_snapshot(&self, data: Vec<u8>) {
-        self.raft.lock().unwrap().save_snapshot(data);
+    pub fn save_state_and_snapshot(&self, data: Vec<u8>) {
+        self.raft.lock().unwrap().save_state_and_snapshot(data);
+    }
+
+    pub fn check_and_do_compress_log(&self, maxraftstate: usize, index: u64) {
+        self.raft.lock().unwrap().check_and_do_compress_log(maxraftstate, index);
     }
 
     /// the service using Raft (e.g. a k/v server) wants to start
@@ -992,6 +1084,7 @@ impl RaftService for Node {
             success: false,
             next_index: 1,
         };
+        //my_debug!("id:{} append_entries begin", raft.me);
         if args.term < raft.term() {
             my_debug!("warn:me[{}:{}] recv [{}:{}]", raft.me, raft.term(), args.leader_id, args.term);
             return Box::new(futures::future::result(Ok(reply)));
@@ -1048,6 +1141,7 @@ impl RaftService for Node {
                     raft.set_commit_index(new_commit_index);
                 }
                 let _ret = self.time_reset.lock().unwrap().clone().unwrap().send(1);  //再次重置
+                //my_debug!("id:{} append_entries end", raft.me);
                 return Box::new(futures::future::result(Ok(reply)));
             }
             else {  //日志不匹配
@@ -1057,5 +1151,58 @@ impl RaftService for Node {
         else {  //日志不匹配
             return Box::new(futures::future::result(Ok(reply)));
         }
+    }
+
+    fn install_snapshot(&self, args: SnapshotArgs) -> RpcFuture<SnapshotReply> {
+        let mut raft = self.raft.lock().unwrap();
+        let mut reply = SnapshotReply {
+            term: raft.term(),
+        };
+        if args.term < raft.term() {
+            my_debug!("warn:me[{}:{}] recv term [{}:{}]", raft.me, raft.term(), args.leader_id, args.term);
+            return Box::new(futures::future::result(Ok(reply)));
+        }
+        if args.last_included_index <= raft.snapshot_index {
+		    my_debug!("warn:me[{}:{}] recv snapshot [{}:{}]", raft.me, raft.snapshot_index, args.leader_id, args.last_included_index);
+		    return Box::new(futures::future::result(Ok(reply)));
+	    }
+        let _ret = self.time_reset.lock().unwrap().clone().unwrap().send(1);
+        if args.term == raft.term() && raft.is_candidate() {  //candidate遇到leader
+            raft.set_state(args.term, false, false);
+        }
+        if args.term > raft.term() {  //遇到term更大，变成follower，无论是candidate还是leader，都变为follower
+            raft.set_state(args.term, false, false);
+        }
+        reply.term = raft.term();
+        
+        if args.last_included_index > (raft.snapshot_index + raft.log.len() - 1) { //所有log都要替换
+            let log = LogEntry {
+                index: args.last_included_index,
+                term: args.last_included_term,
+                entry: vec![],
+            }
+            raft.log = vec![log];
+        }
+        else {
+            raft.delete_prev_log(args.last_included_index);
+        }
+        raft.snapshot_index = args.last_included_index;
+        raft.snapshot_term = args.snapshot_term;
+        raft.commit_index = args.last_included_index;
+        raft.last_applied = args.last_included_index;
+
+        raft.save_state_and_snapshot(args.snapshot.clone());  //保存state和snapshot
+
+        let mesg = ApplyMsg {
+            command_valid: true,
+            command: vec![],
+            command_index: raft.snapshot_index,
+            is_snapshot: true,
+            snapshot: args.snapshot.clone(),
+        };
+        let _ret = raft.apply_ch.unbounded_send(mesg);  //发送snapshot给kv_server
+        my_debug!("id:{} apply snapshot:{}", raft.me, raft.snapshot_index);
+
+        Box::new(futures::future::result(Ok(reply)))
     }
 }

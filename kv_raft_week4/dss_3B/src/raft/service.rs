@@ -2,6 +2,7 @@ labrpc::service! {
     service raft {
         rpc request_vote(RequestVoteArgs) returns (RequestVoteReply);
         rpc append_entries(RequestEntryArgs) returns (RequestEntryReply);
+        rpc install_snapshot(SnapshotArgs) returns (SnapshotReply);
         // Your code here if more rpc desired.
         // rpc xxx(yyy) returns (zzz)
     }
@@ -73,4 +74,27 @@ pub struct RequestEntryReply {
 
     #[prost(uint64, tag = "3")]
     pub next_index: u64,
+}
+#[derive(Clone, PartialEq, Message)]
+pub struct SnapshotArgs {
+    #[prost(uint64, tag = "1")]
+    pub term: u64,
+
+    #[prost(uint64, tag = "2")]
+    pub leader_id: u64,
+
+    #[prost(uint64, tag = "3")]
+    last_included_index: u64,
+
+    #[prost(uint64, tag = "4")]
+    last_included_term: u64,
+
+    #[prost(bytes, tag = "5")]
+    snapshot: Vec<u8>,
+
+}
+#[derive(Clone, PartialEq, Message)]
+pub struct SnapshotReply {
+    #[prost(uint64, tag = "1")]
+    pub term: u64,
 }

@@ -42,6 +42,8 @@ message CommitRequest {
     uint64 commit_ts = 3;
     bytes write_key = 4;
     bytes write_value = 5;
+    bytes primary_key = 6;
+    bytes primary_value = 7;
 }
 
 message CommitResponse {}

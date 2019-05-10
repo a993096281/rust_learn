@@ -256,14 +256,25 @@ impl transaction::Service for MemoryStorage {
         // Your code here.
         //unimplemented!()
         let mut data = self.data.lock().unwrap();
-        if req.is_primary && data.read(req.write_key.clone(), Column::Lock, Some(req.start_ts), Some(req.start_ts)).is_none()
-        {  //primary的锁被清除了，
+
+
+        if data.read(req.write_key.clone(), Column::Lock, Some(req.start_ts), Some(req.start_ts)).is_none()
+        {  //primary的锁不在了，
+            if data.read(req.write_key.clone(), Column::Write, Some(req.commit_ts), Some(req.commit_ts)).is_some() { 
+                //如果读取到该数据commit_ts已经写入，直接返回成功,防止重复写入
+                return Box::new(futures::future::result(Ok(CommitResponse {})));
+            }
             return Box::new(futures::future::result(Err(Error::Other(String::from("error:unlock")))));
+        }
+
+        if !req.is_primary && data.read(req.primary_value.clone(), Column::Write, Some(req.commit_ts), Some(req.commit_ts)).is_none() {
+            //如果secondaries发现primary没有写入，直接返回失败
+            return Box::new(futures::future::result(Err(Error::Other(String::from("error:primary error")))));
         }
 
         //写入write，并清除锁，如果
         data.write(req.write_key.clone(), Column::Write, req.commit_ts, Value::Timestamp(req.start_ts));
-        data.erase(req.write_key.clone(), Column::Lock, req.commit_ts);
+        data.erase(req.write_key.clone(), Column::Lock, req.start_ts);
 
         Box::new(futures::future::result(Ok(CommitResponse {})))
     }

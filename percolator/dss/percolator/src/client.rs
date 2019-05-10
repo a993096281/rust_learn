@@ -184,6 +184,8 @@ impl Client {
             commit_ts,
             write_key: primary.0.clone(),
             write_value: primary.1.clone(),
+            primary_key: primary.0.clone(),
+            primary_value: primary.1.clone(),
         };
         match self.txn_client.commit(&primary_args.clone()).wait()
         {
@@ -203,6 +205,7 @@ impl Client {
             let start_ts = self.txn.start_ts;
             let txn_client = self.txn_client.clone();
             let write = w.clone();
+            let primary = primary.clone();
             thread::spawn(move || {
                 let w_args = CommitRequest {
                     is_primary: false,
@@ -210,6 +213,9 @@ impl Client {
                     commit_ts,
                     write_key: write.0.clone(),
                     write_value: write.1.clone(),
+                    primary_key: primary.0.clone(),
+                    primary_value: primary.1.clone(),
+
                 };
                 let _ = txn_client.commit(&w_args.clone()).wait();
             });

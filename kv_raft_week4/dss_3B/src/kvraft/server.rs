@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 #[macro_export]
 macro_rules! kv_debug {
     ($($arg: tt)*) => (
-        //println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
+        println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
     )
 }
 
@@ -56,6 +56,9 @@ pub struct Snapshot {  //保存快照结构
 
     #[prost(bytes, repeated, tag = "4")]
     pub latest_requests_value: Vec<Vec<u8>>,
+
+    #[prost(uint64, tag = "5")]
+    pub snapshot_index: u64,
 }
 
 pub struct KvServer {
@@ -69,6 +72,8 @@ pub struct KvServer {
     pub db: HashMap<String, String>,                   //数据库存储
     //pub ack: HashMap<u64, (String, u64)>,                // 日志index <-> (client_name,seq)
     pub latest_requests: HashMap<String, LatestReply>, //client_name <-> ( 回复;对应客户端的最新回复)
+
+    pub snapshot_index: u64,
 }
 
 impl KvServer {
@@ -91,6 +96,7 @@ impl KvServer {
             db: HashMap::new(),
             //ack: HashMap::new(),
             latest_requests: HashMap::new(),
+            snapshot_index: 0,
         };
         kvserver.read_snapshot(snapshot);
         kvserver
@@ -105,6 +111,7 @@ impl KvServer {
             db_value: vec![],
             latest_requests_key: vec![],
             latest_requests_value: vec![],
+            snapshot_index: self.snapshot_index,
         };
         for (key,value) in &self.db {
             let mut db_key = vec![];
@@ -132,6 +139,8 @@ impl KvServer {
         match labcodec::decode(&data) {
             Ok(snapshot) => {
                 let snapshot: Snapshot = snapshot;
+                self.snapshot_index = snapshot.snapshot_index;
+                kv_debug!("server:{} read snapshot snapshot_index:{}", self.me, self.snapshot_index);
                 self.db.clear();
                 self.latest_requests.clear();
                 for i in 0..snapshot.db_key.len() {
@@ -181,7 +190,7 @@ impl KvServer {
                         },
                     }
                     self.latest_requests.insert(latest_requests_key.clone(), latest_requests_value.clone());
-                    kv_debug!("server:{} read snapshot db:{}:{:?}", self.me, latest_requests_key, latest_requests_value);
+                    kv_debug!("server:{} read snapshot requests:{}:{:?}", self.me, latest_requests_key, latest_requests_value);
                 }
             },
             Err(e) => {
@@ -189,9 +198,17 @@ impl KvServer {
             },
         }
     }
-    pub fn save_snapshot(&self) {
+    pub fn save_snapshot(&self) {  //kvserver保存snapshot
         let data = self.creat_snapshot();
-        self.rf.save_snapshot(data);
+        self.rf.save_state_and_snapshot(data);
+    }
+    pub fn if_need_let_raft_compress_log(&self) -> bool {  //是否要让raft检测需要压缩日志
+        if self.maxraftstate.is_some() {
+            if self.maxraftstate.unwrap() > 0 {
+                return true;
+            }
+        }
+        return false;
     }
 }
 
@@ -252,6 +269,16 @@ impl Node {
                     if !apply_msg.command_valid {
                         continue;
                     }
+                    let mut server = inode.server.lock().unwrap();
+                    if apply_msg.is_snapshot {  //说明是snapshot应用
+                        if server.snapshot_index < apply_msg.command_index{  //接收到更新的snapshot_index
+                            server.read_snapshot(apply_msg.snapshot.clone());
+                        }
+                        continue;
+                    }
+                    if apply_msg.command.is_empty() || apply_msg.command_index <= server.snapshot_index {
+                        continue;   //如果index比snapshot_index更小，不允许重复apply
+                    }
                     let command_index = apply_msg.command_index;
                     let mut _entr: OpEntry;
                     match labcodec::decode(&apply_msg.command) {
@@ -269,7 +296,6 @@ impl Node {
                         command_index,
                         _entr
                     );
-                    let mut server = inode.server.lock().unwrap();
                     if server.latest_requests.get(&_entr.client_name).is_none()
                         || server.latest_requests.get(&_entr.client_name).unwrap().seq < _entr.seq
                     {
@@ -309,8 +335,18 @@ impl Node {
                                 continue;
                             }
                         }
-                        server.save_snapshot();
+                        server.save_snapshot();   //kv_server借助raft存储snapshot
                     }
+                    if if_need_let_raft_compress_log() {  //是否让raft检测日志压缩
+                        //这里由于persister在raft里面,所以无法在kv_server处检测大小，只能传参让raft自己检测并压缩；
+                        //也无法在apply_msg中附带参数raftstate的大小，因为若raft一次可能apply多个日志，
+                        //则由于锁的原因，apply_msg参数中raftstate的大小不是最新，
+                        //所以交给raft处理吧。
+                        let maxraftstate: usize = server.maxraftstate.unwrap();
+                        server.rf.check_and_do_compress_log(maxraftstate, command_index);
+
+                    }
+
                     
                     /*if let Some(client_name) = server.ack.get(&command_index) {
                         //需要校验
