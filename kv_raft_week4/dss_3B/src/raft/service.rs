@@ -84,13 +84,13 @@ pub struct SnapshotArgs {
     pub leader_id: u64,
 
     #[prost(uint64, tag = "3")]
-    last_included_index: u64,
+    pub last_included_index: u64,
 
     #[prost(uint64, tag = "4")]
-    last_included_term: u64,
+    pub last_included_term: u64,
 
     #[prost(bytes, tag = "5")]
-    snapshot: Vec<u8>,
+    pub snapshot: Vec<u8>,
 
 }
 #[derive(Clone, PartialEq, Message)]

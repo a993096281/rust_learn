@@ -25,13 +25,13 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 
-use self::config::Entry;  //raft测试的输入日志
-//use crate::kvraft::server::OpEntry as Entry;  //kv_raft测试的输入日志
+//use self::config::Entry;  //raft测试的输入日志
+use crate::kvraft::server::OpEntry as Entry;  //kv_raft测试的输入日志
 
 #[macro_export]
 macro_rules! my_debug {
     ($($arg: tt)*) => (
-        println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
+        //println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
     )
 }
 const TIMEOUT_LOW_BOUND: u64 = 250;   //follow超时时间下界，单位ms
@@ -116,25 +116,28 @@ pub struct RaftState {
     #[prost(uint64, tag = "1")]
     pub term: u64,
 
-    #[prost(bool, tag = "2")]
-    pub is_leader: bool,
+    #[prost(int64, tag = "2")]
+    pub voted_for: i64,         //  其实上是标识自己认为的leader，
 
-    #[prost(bool, tag = "3")]
-    pub is_candidate: bool,
+    //#[prost(bool, tag = "2")] 
+    //pub is_leader: bool,          //实际可不存
 
-    #[prost(uint64, tag = "4")]
-    pub commit_index: u64,
+    //#[prost(bool, tag = "3")]
+    //pub is_candidate: bool,       //实际可不存
 
-    #[prost(uint64, tag = "5")]
-    pub last_applied: u64,
+    //#[prost(uint64, tag = "4")]
+    //pub commit_index: u64,         //不可存，初始值并不能直接恢复，在kv_raft实验中，你无法确定
 
-    #[prost(uint64, tag = "6")]
+    //#[prost(uint64, tag = "5")]
+    //pub last_applied: u64,          //不可存，
+
+    #[prost(uint64, tag = "3")]
     pub snapshot_index: u64,
 
-    #[prost(uint64, tag = "7")]
+    #[prost(uint64, tag = "4")]
     pub snapshot_term: u64,
 
-    #[prost(bytes, repeated, tag = "8")]
+    #[prost(bytes, repeated, tag = "5")]
     pub logs: Vec<Vec<u8>>,
 }
 
@@ -228,7 +231,7 @@ impl Raft {
             self.state.is_candidate()
         );
         if self.state.is_leader() {       //leader
-            self.next_index = Some(vec![1; self.peers.len()]);
+            self.next_index = Some(vec![self.snapshot_index + 1; self.peers.len()]);
             self.match_index = Some(vec![0; self.peers.len()]);
         } else if self.is_candidate() {   //candidate
             self.next_index = None;
@@ -242,8 +245,8 @@ impl Raft {
         self.persist();
     }
     pub fn get_last_log_index_and_term(&self) -> (u64, u64) {
-        let index = self.log.len() - 1;
-        let term = self.log[index].term;
+        let index = self.snapshot_index as usize + self.log.len() - 1;
+        let term = self.log[index - self.snapshot_index as usize].term;
         (index as u64, term)
     }
 
@@ -267,7 +270,8 @@ impl Raft {
         }
         my_debug!("leader:{} handle_append_reply id:{} result:{} for_next_index:{}",
             self.me, id, result, for_next_index);
-        if for_next_index < 1 || for_next_index > self.log.len() as u64 {
+        let log_index = self.snapshot_index + self.log.len() as u64; //可设置的最大log的index
+        if for_next_index < 1 {
             return;
         }
         let mut match_index = self.match_index.clone().unwrap();
@@ -278,22 +282,30 @@ impl Raft {
         //my_debug!("id:{} before next_index:{:?}", self.me, next_index);
         if result == 1 {
             //收到success
-            if for_next_index <= self.log.len() as u64 {
+            if for_next_index <= log_index {
                 match_index[id] = for_next_index - 1;
                 next_index[id] = for_next_index;
             }
             else {
-                my_debug!("error:leader:{} handle_append_reply id:{} for_next_index:{} log:{}",
-                    self.me, id, for_next_index, self.log.len());
+                my_debug!("error:leader:{} handle_append_reply id:{} for_next_index:{} log:{} snapshot:{}",
+                    self.me, id, for_next_index, self.log.len(), self.snapshot_index);
                 return;
             }
         } else if result == 0 {
             //收到fail
-            if next_index[id] < (MAX_SEND_ENTRIES + 1) {
-                next_index[id] = 1;
-            } else {
-                next_index[id] -= MAX_SEND_ENTRIES;
+            if (for_next_index > self.snapshot_index + 1) && for_next_index <= log_index {  
+            //snapshot时，follower希望的next_index有效，则可设置next_index，
+                next_index[id] = for_next_index;
             }
+            else {
+                if next_index[id] < (MAX_SEND_ENTRIES + 1) {
+                    next_index[id] = 1;
+                }
+                else {
+                    next_index[id] -= MAX_SEND_ENTRIES;
+                }
+            }
+            
         }
         //收到error，不变
         self.next_index = Some(next_index.clone());
@@ -358,7 +370,7 @@ impl Raft {
                 self.last_applied += 1; //并发送
                 let mesg = ApplyMsg {
                     command_valid: true,
-                    command: self.log[self.last_applied as usize].entry.clone(),
+                    command: self.log[(self.last_applied - self.snapshot_index) as usize].entry.clone(),
                     command_index: self.last_applied,
                     is_snapshot: false,
                     snapshot: vec![],
@@ -371,7 +383,8 @@ impl Raft {
     }
 
     pub fn push_log(&mut self, index: u64, term: u64, entry: &Vec<u8>) {
-        if self.log.len() as u64 != index {
+
+        if self.snapshot_index + self.log.len() as u64 != index {
             my_debug!(
                 "error:id:{} push index:{} error log:[{}:{}]",
                 self.me,
@@ -460,7 +473,7 @@ impl Raft {
         }
         if index > self.commit_index || index <= self.snapshot_index {
             my_debug!("error:id:{} compress_log error index:{} commit:{} snapshot:{}",
-                self.me, self.commit_index, self.snapshot_index);
+                self.me, index, self.commit_index, self.snapshot_index);
             return;
         }
         self.delete_prev_log(index);  //删除index之前的日志
@@ -480,12 +493,13 @@ impl Raft {
         // labcodec::encode(&self.yyy, &mut data).unwrap();
         // self.persister.save_raft_state(data);
         let mut data = vec![];
+        let mut voted_for: i64 = -1;
+        if self.voted_for.is_some() {
+            voted_for = self.voted_for.clone().unwrap() as i64;
+        }
         let mut raft_state = RaftState {
             term: self.term(),
-            is_leader: self.is_leader(),
-            is_candidate: self.is_candidate(),
-            commit_index: self.commit_index,
-            last_applied: self.last_applied,
+            voted_for: voted_for,
             snapshot_index: self.snapshot_index,
             snapshot_term: self.snapshot_term,
             logs: vec![],
@@ -502,12 +516,13 @@ impl Raft {
     }
     pub fn save_state_and_snapshot(&self, data2: Vec<u8>) {
         let mut data = vec![];
+        let mut voted_for: i64 = -1;
+        if self.voted_for.is_some() {
+            voted_for = self.voted_for.clone().unwrap() as i64;
+        }
         let mut raft_state = RaftState {
             term: self.term(),
-            is_leader: self.is_leader(),
-            is_candidate: self.is_candidate(),
-            commit_index: self.commit_index,
-            last_applied: self.last_applied,
+            voted_for: voted_for,
             snapshot_index: self.snapshot_index,
             snapshot_term: self.snapshot_term,
             logs: vec![],
@@ -551,10 +566,20 @@ impl Raft {
                 };
 
                 self.state = restate;
-                self.commit_index = state.commit_index;
-                self.last_applied = state.last_applied;
+                self.commit_index = state.snapshot_index;
+                self.last_applied = state.snapshot_index;
                 self.snapshot_index = state.snapshot_index;
                 self.snapshot_term = state.snapshot_term;
+
+                if state.voted_for == -1 {
+                    self.voted_for = None;
+                }
+                else {
+                    self.voted_for = Some(state.voted_for as usize);
+                }
+
+                self.log[0].index = self.snapshot_index;
+                self.log[0].term = self.snapshot_term;
 
                 my_debug!("id:{} restore state:{:?} num:{}", self.me, state, state.logs.len());
                 for i in 0..state.logs.len() {
@@ -619,7 +644,7 @@ impl Raft {
         M: labcodec::Message,
     {
         if self.is_leader() {
-            let index = self.log.len() as u64;
+            let index = self.snapshot_index + self.log.len() as u64;
             let term = self.term();
             let mut buf = vec![];
             labcodec::encode(command, &mut buf).map_err(Error::Encode)?;
@@ -847,7 +872,7 @@ impl Node {
                 let args = SnapshotArgs {
                     term: raft.term(),
                     leader_id: id as u64,
-                    last_included_index: ratf.snapshot_index,
+                    last_included_index: raft.snapshot_index,
                     last_included_term: raft.snapshot_term,
                     snapshot: raft.persister.snapshot(),
                 };
@@ -865,13 +890,18 @@ impl Node {
                                 raft.set_state(rep.term, false, false);
                             }
                             if raft.is_leader() {  //还是leader，更新next_index,match_index
-                                raft.next_index.unwrap()[i] = args.last_included_index + 1;
-                                raft.match_index.unwrap()[i] = args.last_included_index;
+                                let mut next_index = raft.next_index.clone().unwrap();
+                                let mut match_index = raft.match_index.clone().unwrap();
+                                next_index[i] = args.last_included_index + 1;
+                                match_index[i] = args.last_included_index;
+                                raft.next_index = Some(next_index.clone());
+                                raft.match_index = Some(match_index.clone());
                                 let time2 = time.elapsed().as_millis();
-                                my_debug!("leader:{} do snapshot:{} success time:{}ms! ", me, i, time2);
+                                my_debug!("leader:{} do snapshot:{} success time:{}s! ", me, i, time2);
                             }
                         },
                         Err(_) => {},
+                    }
                 });
                 continue;
             }
@@ -1070,7 +1100,8 @@ impl RaftService for Node {
                 if (args.last_log_term == last_log_term && args.last_log_index >= last_log_index) ||
 				    args.last_log_term > last_log_term {  //如果日志更加新
                         reply.vote_granted = true;
-                        raft.voted_for = Some(args.candidate_id as usize); 
+                        raft.voted_for = Some(args.candidate_id as usize);
+                        raft.persist(); 
                 }
             }
         }
@@ -1082,7 +1113,7 @@ impl RaftService for Node {
         let mut reply = RequestEntryReply {
             term: raft.term(),
             success: false,
-            next_index: 1,
+            next_index: raft.snapshot_index + 1,
         };
         //my_debug!("id:{} append_entries begin", raft.me);
         if args.term < raft.term() {
@@ -1097,11 +1128,18 @@ impl RaftService for Node {
         let _ret = self.time_reset.lock().unwrap().clone().unwrap().send(1);  //先重置超时，防止处理时间过长
         if args.term == raft.term() && raft.is_candidate() {  //candidate遇到leader
             raft.set_state(args.term, false, false);
+            raft.voted_for = Some(args.leader_id as usize);
+            raft.persist();
         }
         if args.term > raft.term() {  //遇到term更大，变成follower，无论是candidate还是leader，都变为follower
             raft.set_state(args.term, false, false);
+            raft.voted_for = Some(args.leader_id as usize);
+            raft.persist();
         }
         reply.term = raft.term();
+        if args.prev_log_index < raft.snapshot_index {  //比我的snapshot更小，失败返回
+            return Box::new(futures::future::result(Ok(reply)));
+        }
         if let Some(entry) = raft.get_log(args.prev_log_index) {  //
             if entry.term == args.prev_log_term {  //日志匹配
                 if args.entries.len() != 0 {  //有附加的rpc
@@ -1169,25 +1207,29 @@ impl RaftService for Node {
         let _ret = self.time_reset.lock().unwrap().clone().unwrap().send(1);
         if args.term == raft.term() && raft.is_candidate() {  //candidate遇到leader
             raft.set_state(args.term, false, false);
+            raft.voted_for = Some(args.leader_id as usize);
+            raft.persist();
         }
         if args.term > raft.term() {  //遇到term更大，变成follower，无论是candidate还是leader，都变为follower
             raft.set_state(args.term, false, false);
+            raft.voted_for = Some(args.leader_id as usize);
+            raft.persist();
         }
         reply.term = raft.term();
         
-        if args.last_included_index > (raft.snapshot_index + raft.log.len() - 1) { //所有log都要替换
+        if args.last_included_index > (raft.snapshot_index + raft.log.len() as u64 - 1) { //所有log都要替换
             let log = LogEntry {
                 index: args.last_included_index,
                 term: args.last_included_term,
                 entry: vec![],
-            }
+            };
             raft.log = vec![log];
         }
         else {
             raft.delete_prev_log(args.last_included_index);
         }
         raft.snapshot_index = args.last_included_index;
-        raft.snapshot_term = args.snapshot_term;
+        raft.snapshot_term = args.last_included_term;
         raft.commit_index = args.last_included_index;
         raft.last_applied = args.last_included_index;
 

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 #[macro_export]
 macro_rules! kv_debug {
     ($($arg: tt)*) => (
-        println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
+        //println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
     )
 }
 
@@ -45,20 +45,21 @@ pub struct OpEntry { //日志结构
 
 #[derive(Clone, PartialEq, Message)]
 pub struct Snapshot {  //保存快照结构
-    #[prost(bytes, repeated, tag = "1")]
-    pub db_key: Vec<Vec<u8>>,  
+    #[prost(uint64, tag = "1")]
+    pub snapshot_index: u64,
 
     #[prost(bytes, repeated, tag = "2")]
-    pub db_value: Vec<Vec<u8>>,  
+    pub db_key: Vec<Vec<u8>>,  
 
     #[prost(bytes, repeated, tag = "3")]
-    pub latest_requests_key: Vec<Vec<u8>>,
+    pub db_value: Vec<Vec<u8>>,  
 
     #[prost(bytes, repeated, tag = "4")]
+    pub latest_requests_key: Vec<Vec<u8>>,
+
+    #[prost(bytes, repeated, tag = "5")]
     pub latest_requests_value: Vec<Vec<u8>>,
 
-    #[prost(uint64, tag = "5")]
-    pub snapshot_index: u64,
 }
 
 pub struct KvServer {
@@ -107,11 +108,11 @@ impl KvServer {
     pub fn creat_snapshot(&self) -> Vec<u8> {
         let mut data = vec![];
         let mut snapshot = Snapshot {
+            snapshot_index: self.snapshot_index,
             db_key: vec![],
             db_value: vec![],
             latest_requests_key: vec![],
             latest_requests_value: vec![],
-            snapshot_index: self.snapshot_index,
         };
         for (key,value) in &self.db {
             let mut db_key = vec![];
@@ -335,9 +336,10 @@ impl Node {
                                 continue;
                             }
                         }
-                        server.save_snapshot();   //kv_server借助raft存储snapshot
                     }
-                    if if_need_let_raft_compress_log() {  //是否让raft检测日志压缩
+                    server.snapshot_index = command_index;
+                    server.save_snapshot();   //kv_server借助raft存储snapshot
+                    if server.if_need_let_raft_compress_log() {  //是否让raft检测日志压缩
                         //这里由于persister在raft里面,所以无法在kv_server处检测大小，只能传参让raft自己检测并压缩；
                         //也无法在apply_msg中附带参数raftstate的大小，因为若raft一次可能apply多个日志，
                         //则由于锁的原因，apply_msg参数中raftstate的大小不是最新，

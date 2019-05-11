@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-const TIMEOUT_WAIT_RAFT: u64 = 220;  //等raft的apply
-const TIMEOUT_WAIT_NEXT_LEADER: u64 = 110;  //错误leader时，重发等待时间
+const TIMEOUT_WAIT_RAFT: u64 = 110;  //等raft的apply
+const TIMEOUT_WAIT_NEXT_LEADER: u64 = 50;  //错误leader时，重发等待时间
 
 enum Op {
     Put(String, String),
