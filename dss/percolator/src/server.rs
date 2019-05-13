@@ -269,7 +269,7 @@ impl transaction::Service for MemoryStorage {
 
         if !req.is_primary && data.read(req.primary_value.clone(), Column::Write, Some(req.commit_ts), Some(req.commit_ts)).is_none() {
             //如果secondaries发现primary没有写入，直接返回失败
-            return Box::new(futures::future::result(Err(Error::Other(String::from("error:primary error")))));
+            return Box::new(futures::future::result(Err(Error::Other(String::from("error:primary not write error")))));
         }
 
         //写入write，并清除锁，如果
