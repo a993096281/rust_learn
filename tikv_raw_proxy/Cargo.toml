@@ -1,0 +1,14 @@
+[package]
+name = "tikv_raw_proxy"
+version = "0.1.0"
+authors = ["lzw <993096281@qq.com>"]
+edition = "2018"
+
+[dependencies]
+protobuf = "~2"
+futures = "0.1.16"
+grpcio = { version = "0.4", default-features = false, features = ["protobuf-codec"] }
+
+
+[build-dependencies]
+protoc-grpcio = "1.0.1"

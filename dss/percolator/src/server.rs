@@ -259,15 +259,15 @@ impl transaction::Service for MemoryStorage {
 
 
         if data.read(req.write_key.clone(), Column::Lock, Some(req.start_ts), Some(req.start_ts)).is_none()
-        {  //primary的锁不在了，
-            if data.read(req.write_key.clone(), Column::Write, Some(req.commit_ts), Some(req.commit_ts)).is_some() { 
-                //如果读取到该数据commit_ts已经写入，直接返回成功,防止重复写入
-                return Box::new(futures::future::result(Ok(CommitResponse {})));
+        {  //该写入的锁不在了，
+            if data.read(req.write_key.clone(), Column::Write, Some(req.start_ts), Some(req.commit_ts)).is_some() { 
+                //如果读取到该数据commit_ts已经写入,但是万一是别的事务的写入呢？？？返回事务成功不好，
+                return Box::new(futures::future::result(Err(Error::Other(String::from("warn: write before commit_ts is done!")))));
             }
             return Box::new(futures::future::result(Err(Error::Other(String::from("error:unlock")))));
         }
 
-        if !req.is_primary && data.read(req.primary_value.clone(), Column::Write, Some(req.commit_ts), Some(req.commit_ts)).is_none() {
+        if !req.is_primary && data.read(req.primary_value.clone(), Column::Write, Some(req.start_ts), Some(req.commit_ts)).is_none() {
             //如果secondaries发现primary没有写入，直接返回失败
             return Box::new(futures::future::result(Err(Error::Other(String::from("error:primary not write error")))));
         }
@@ -291,7 +291,7 @@ impl MemoryStorage {
             if current_ts - key_ts.1 > TTL {  //该锁锁住的时间超过TTL
                 let primary = value.get_vector();
                 let ts = key_ts.1;
-                if data.read(primary.clone(), Column::Lock, Some(ts), Some(ts)).is_some()  //查看primary有没有提交
+                if data.read(primary.clone(), Column::Lock, Some(ts), Some(ts)).is_some()  //查看primary的锁在不在
                 {  //在，说明primary没有提交到write，放弃该事务
                     let uncommitted_keys = data.get_primary_lock_keys(ts, primary.clone());
                     for k in uncommitted_keys {   //清除primary事务的所有key的锁和数据
