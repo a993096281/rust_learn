@@ -22,6 +22,26 @@ message RegionEpoch {
     // Region version, auto increment when split or merge
     uint64 version = 2;
 }
+enum StoreState {
+    Up = 0;
+    Offline = 1;
+    Tombstone = 2;
+}
+
+// Case insensitive key/value for replica constraints.
+message StoreLabel {
+    string key = 1;
+    string value = 2;
+}
+
+message Store {
+    uint64 id = 1;
+    string address = 2;
+    StoreState state = 3;
+    repeated StoreLabel labels = 4;
+    string version = 5;
+    // more attributes......
+}
 kvrpcpb:
 message Context {
     reserved 4;
@@ -43,6 +63,7 @@ message Context {
 pub struct RawContext {
     pub region: metapb::Region,
     pub leader: metapb::Peer,
+    pub store: metapb::Store,
 }
 
 impl RawContext {

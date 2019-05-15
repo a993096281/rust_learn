@@ -48,20 +48,39 @@ impl PdClient {
 
         let mut request = pd_request!(self.cluster_id, pdpb::GetRegionRequest); //主要是为了添加RequestHeader
         request.set_region_key(key.clone());
-        match self.pdclient.get_region(&request) {
+        let mut region;
+        let mut leader;
+        let mut store;
+        match self.pdclient.get_region(&request) {   //获取key的region
             Ok(mut resp) => {
-                let raw_context = RawContext {
-                    region: resp.take_region(),
-                    leader: resp.take_leader(),
-                };
-                return Ok(raw_context);
+                region = resp.take_region();
+                leader = resp.take_leader();
+                
+                //return Ok(raw_context);
                 //println!("{:?}",resp);
             },
             Err(e) => {
                 return Err(e.to_string());
             }
         }
-
+        let store_id = leader.get_store_id();
+        let mut request = pd_request!(self.cluster_id, pdpb::GetStoreRequest);
+        request.set_store_id(store_id);
+        match self.pdclient.get_store(&request) {   //获取store的信息
+            Ok(mut resp) => {
+                store = resp.take_store();
+            },
+            Err(e) => {
+                return Err(e.to_string());
+            }
+        }
+        let raw_context = RawContext {
+            region,
+            leader,
+            store,
+        };
+        Ok(raw_context)
+        
     }
 
     

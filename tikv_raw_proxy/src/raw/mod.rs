@@ -1,7 +1,6 @@
 
 pub mod raw_proxy;
 
-#[macro_use]
 pub mod pd_client;
 pub mod kv_client;
 pub mod context;
