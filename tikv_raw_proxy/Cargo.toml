@@ -5,10 +5,14 @@ authors = ["lzw <993096281@qq.com>"]
 edition = "2018"
 
 [dependencies]
-protobuf = "~2"
+protobuf = "~2.0"
 futures = "0.1.16"
-grpcio = { version = "0.4", default-features = false, features = ["protobuf-codec"] }
+grpcio = { version = "0.4", features = [ "secure" ] }
 
+
+[dependencies.kvproto]
+git = "https://github.com/pingcap/kvproto.git"
+branch  = "release-3.0"
 
 [build-dependencies]
-protoc-grpcio = "1.0.1"
+protoc-grpcio = "0.3.1"

@@ -3,14 +3,17 @@
 use crate::raw::RawProxy;
 use crate::protos::proxy::{ResponseStatus, GetRequest, GetResponse, PutRequest, PutResponse, DeleteRequest, DeleteResponse, ScanRequest, ScanResponse};
 use crate::protos::proxy_grpc::{self, Proxy};
-use grpcio::{Environment, RpcContext, ServerBuilder, UnarySink};
+use grpcio::{Environment, EnvBuilder, RpcContext, ServerBuilder, UnarySink};
 use futures::Future;
+
+use crate::{Key, Value, Result};
 
 use std::sync::Arc;
 
 #[derive(Clone)]
 struct Service{
     db: Arc<RawProxy>,
+    env: Arc<Environment>,
 }
 
 impl Proxy for Service {
@@ -47,5 +50,23 @@ impl Proxy for Service {
 }
 
 impl Service {
-
+    pub fn new(endpoint: &String) -> Result<Service> {
+        let env = Arc::new(
+            EnvBuilder::new()
+                .cq_count(2)       // 设置队列深度和poll线程
+                .name_prefix("tikv_raw_proxy_grpc")   //设置线程名称
+                .build(),
+        );
+        let raw_proxy = match RawProxy::connect(endpoint.clone(), env.clone()) {
+            Ok(rp) => { rp },
+            Err(e) => {
+                return Err(e);
+            },
+        };
+        let service = Service {
+            db: Arc::new(raw_proxy),
+            env,
+        };
+        Ok(service)
+    }
 }
