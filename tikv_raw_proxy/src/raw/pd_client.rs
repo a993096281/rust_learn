@@ -1,5 +1,5 @@
 
-use kvproto::{pdpb, pdpb_grpc};
+use kvproto::{pdpb, pdpb_grpc, metapb};
 use grpcio::{ChannelBuilder, EnvBuilder};
 use grpcio::Environment;
 
@@ -44,31 +44,26 @@ impl PdClient {
         Ok(pd)
     }
 
-    pub fn creat_raw_context(&self, key: &Key) -> Result<RawContext> {
+    pub fn creat_raw_context(&self, key: Key) -> Result<RawContext> {  //根据key创建RawContext
 
-        let mut request = pd_request!(self.cluster_id, pdpb::GetRegionRequest); //主要是为了添加RequestHeader
-        request.set_region_key(key.clone());
         let mut region;
         let mut leader;
         let mut store;
-        match self.pdclient.get_region(&request) {   //获取key的region
+        match self.get_region_and_leader(key.clone()) {  //获取region和leader
             Ok(mut resp) => {
-                region = resp.take_region();
-                leader = resp.take_leader();
+                region = resp.0;
+                leader = resp.1;
                 
-                //return Ok(raw_context);
-                //println!("{:?}",resp);
             },
             Err(e) => {
                 return Err(e.to_string());
             }
         }
         let store_id = leader.get_store_id();
-        let mut request = pd_request!(self.cluster_id, pdpb::GetStoreRequest);
-        request.set_store_id(store_id);
-        match self.pdclient.get_store(&request) {   //获取store的信息
+        
+        match self.get_store(store_id) {   //获取store的信息
             Ok(mut resp) => {
-                store = resp.take_store();
+                store = resp;
             },
             Err(e) => {
                 return Err(e.to_string());
@@ -82,11 +77,39 @@ impl PdClient {
         Ok(raw_context)
         
     }
-
-    
-
-    
-    
+    pub fn get_region_and_leader(&self, key: Key) -> Result<(metapb::Region, metapb::Peer)> {   //根据key获取region和leader
+        let mut request = pd_request!(self.cluster_id, pdpb::GetRegionRequest); //主要是为了添加RequestHeader
+        request.set_region_key(key.clone());
+        let mut region;
+        let mut leader;
+        match self.pdclient.get_region(&request) {   //获取key的region
+            Ok(mut resp) => {
+                my_debug!("get region key:{} res:{:?}", String::from_utf8(key.clone()).unwrap(), resp);
+                region = resp.take_region();
+                leader = resp.take_leader();
+                if leader.get_store_id() == 0 {  //没有leader
+                    return Err("no learer".to_string());
+                }
+                return Ok((region, leader));
+                //println!("{:?}",resp);
+            },
+            Err(e) => {
+                return Err(e.to_string());
+            }
+        }
+    } 
+    pub fn get_store(&self, store_id: u64) -> Result<metapb::Store> {   //根据store_id获取Store
+        let mut request = pd_request!(self.cluster_id, pdpb::GetStoreRequest);  ////主要是为了添加RequestHeader
+        request.set_store_id(store_id);
+        match self.pdclient.get_store(&request) {   //获取store的信息
+            Ok(mut resp) => {
+                return Ok(resp.take_store());
+            },
+            Err(e) => {
+                return Err(e.to_string());
+            }
+        }
+    }
 
 }
 
@@ -102,12 +125,12 @@ mod tests {
                 .name_prefix("tikv_raw_proxy_grpc")   //设置线程名称
                 .build(),
         );
-        let client = PdClient::connect("127.0.0.1:2379".to_string(), env).unwrap();
+        let pd = PdClient::connect("127.0.0.1:2379".to_string(), env).unwrap();
         //let pdclient = client.pdclient.clone();
         //let resp = pdclient.get_members(&pdpb::GetMembersRequest::new());
         //println!("{:?}",client.members);
         //let resp = pdclient
-        let resp = client.creat_raw_context(&"dv".to_string().into_bytes()).unwrap();
+        let resp = pd.get_region_and_leader(vec![]);
         println!("{:?}",resp);
     }
 }

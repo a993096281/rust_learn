@@ -1,4 +1,5 @@
 
+#[macro_use]
 pub mod raw_proxy;
 
 pub mod pd_client;

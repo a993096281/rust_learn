@@ -67,7 +67,9 @@ pub struct RawContext {
 }
 
 impl RawContext {
-    
+    pub fn address(&self) -> String {
+        self.store.get_address().clone().to_string()
+    }
 }
 
 impl From<RawContext> for kvrpcpb::Context {
