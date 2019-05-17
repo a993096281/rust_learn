@@ -13,9 +13,9 @@ const MAX_RAW_KV_SCAN_LIMIT: u32 = 10240;   //最大raw_sacn的limit
 
 #[macro_export]
 macro_rules! my_debug {
-    ($($arg: tt)*) => (
-        println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
-    )
+    ($($arg: tt)*) => {{
+        //println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
+    }};
 }
 
 #[derive(Clone)]

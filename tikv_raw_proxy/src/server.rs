@@ -15,7 +15,7 @@ use std::sync::Arc;
 #[macro_export]
 macro_rules! server_debug {
     ($($arg: tt)*) => {{
-        println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
+        //println!("Debug[{}:{}]: {}", file!(), line!(),format_args!($($arg)*));
     }};
 }
 
