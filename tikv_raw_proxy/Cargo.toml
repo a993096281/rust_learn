@@ -3,6 +3,15 @@ name = "tikv_raw_proxy"
 version = "0.1.0"
 authors = ["lzw <993096281@qq.com>"]
 edition = "2018"
+build = "build.rs"
+
+[[example]]
+name = "server"
+path = "examples/server.rs"
+
+[[example]]
+name = "client"
+path = "examples/client.rs"
 
 [dependencies]
 protobuf = "~2.0"

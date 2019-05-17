@@ -1,5 +1,6 @@
 
 use kvproto::{kvrpcpb, metapb};
+use crate::Key;
 
 /*
 metapb:
@@ -69,6 +70,12 @@ pub struct RawContext {
 impl RawContext {
     pub fn address(&self) -> String {
         self.store.get_address().clone().to_string()
+    }
+    pub fn start_key(&self) -> Key {
+        self.region.get_start_key().clone().to_vec()
+    }
+    pub fn end_key(&self) -> Key {
+        self.region.get_end_key().clone().to_vec()
     }
 }
 

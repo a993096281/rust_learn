@@ -1,12 +1,12 @@
 
 use kvproto::{pdpb, pdpb_grpc, metapb};
-use grpcio::{ChannelBuilder, EnvBuilder};
+use grpcio::ChannelBuilder;
 use grpcio::Environment;
 
-use crate::{Key, Value, Result};
+use crate::{Key, Result};
 use crate::raw::RawContext;
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 macro_rules! pd_request {
     ($cluster_id:expr, $type:ty) => {{
@@ -50,7 +50,7 @@ impl PdClient {
         let mut leader;
         let mut store;
         match self.get_region_and_leader(key.clone()) {  //获取region和leader
-            Ok(mut resp) => {
+            Ok(resp) => {
                 region = resp.0;
                 leader = resp.1;
                 
@@ -62,7 +62,7 @@ impl PdClient {
         let store_id = leader.get_store_id();
         
         match self.get_store(store_id) {   //获取store的信息
-            Ok(mut resp) => {
+            Ok(resp) => {
                 store = resp;
             },
             Err(e) => {
@@ -110,12 +110,38 @@ impl PdClient {
             }
         }
     }
+    /*pub fn get_region_by_id(&self, region_id: u64) -> Result<(metapb::Region, metapb::Peer)> {
+        let mut request = pd_request!(self.cluster_id, pdpb::GetRegionByIDRequest); //主要是为了添加RequestHeader
+        request.set_region_id(region_id);
+        let mut region;
+        let mut leader;
+        match self.pdclient.get_region_by_id(&request) {   //获取key的region
+            Ok(mut resp) => {
+                my_debug!("get region id:{} res:{:?}", region_id, resp);
+                //my_debug!("get region start:{} end:{}", resp.get_region().get_start_key().len(), resp.get_region().get_end_key().len());
+                region = resp.take_region();
+                leader = resp.take_leader();
+                if region.get_id() == 0 {  //没有该region
+                    return Err("no region".to_string());
+                }
+                if leader.get_store_id() == 0 {  //没有leader
+                    return Err("no learer".to_string());
+                }
+                return Ok((region, leader));
+                //println!("{:?}",resp);
+            },
+            Err(e) => {
+                return Err(e.to_string());
+            }
+        }
+    }*/
 
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grpcio::EnvBuilder;
 
     #[test]
     fn test_pdclient() {
@@ -126,11 +152,20 @@ mod tests {
                 .build(),
         );
         let pd = PdClient::connect("127.0.0.1:2379".to_string(), env).unwrap();
+
         //let pdclient = client.pdclient.clone();
         //let resp = pdclient.get_members(&pdpb::GetMembersRequest::new());
         //println!("{:?}",client.members);
         //let resp = pdclient
-        let resp = pd.get_region_and_leader(vec![]);
-        println!("{:?}",resp);
+        //let resp = pd.get_region_and_leader("d555".to_string().into_bytes());
+       // println!("{:?}",resp);
+        //let resp = pd.get_region_by_id(2);
+        //let resp = pd.get_region_by_id(1);
+        //let resp = pd.get_region_by_id(3);
+        //println!("{:?}",resp);
+        println!("{:?}",pd.creat_raw_context("".to_string().into_bytes()));
+        println!("{:?}",pd.creat_raw_context("zzz".to_string().into_bytes()));
+        
+        
     }
 }

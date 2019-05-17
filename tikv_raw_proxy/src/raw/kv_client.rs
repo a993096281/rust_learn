@@ -1,12 +1,13 @@
 
 use kvproto::{errorpb, kvrpcpb, tikvpb_grpc::TikvClient};
-use grpcio::{ChannelBuilder, EnvBuilder};
+use grpcio::ChannelBuilder;
 use grpcio::Environment;
 
+use crate::protos::proxy::KvPair;
 use crate::{Key, Value, Result};
 use crate::raw::RawContext;
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 macro_rules! raw_request {
     ($context:expr, $type:ty) => {{
@@ -89,28 +90,34 @@ impl KvClient {
             }
         }
     }
-    pub fn raw_scan(&self, context: RawContext, key_start: Key, key_end: Key, limit: u32) -> Result<()> {
+    pub fn raw_scan(&self, context: RawContext, key_start: Key, key_end: Key, limit: u32) -> Result<Vec<KvPair>> {
         let mut req = raw_request!(context, kvrpcpb::RawScanRequest);
         req.set_start_key(key_start.clone());
         req.set_limit(limit);
         req.set_end_key(key_end.clone());
 
         match self.kvclient.raw_scan(&req) {
-            Ok(resp) => {  
-                my_debug!("raw_scan {}", resp.get_kvs().len());
+            Ok(mut resp) => {  
+                my_debug!("raw_scan kvs:{}", resp.get_kvs().len());
                 //my_debug!("raw_scan {:?}", resp);
                 if !resp.get_region_error().get_message().is_empty() { //存在错误
                     my_debug!("{:?}", resp);
                     return Err(self.handle_error(resp.get_region_error().clone(), String::new()));
                 }
-                //println!("{:?}", resp);
-                return Ok(());
+                let result = resp.take_kvs().into_vec().into_iter().map(Self::convert_from_grpc_pair).collect();
+                return Ok(result);
             },
             Err(e) => {
                 return Err(e.to_string());
             }
         }
         //Err("no done".to_string())
+    }
+    fn convert_from_grpc_pair(mut pair: kvrpcpb::KvPair) -> KvPair {
+        let mut kv = KvPair::new();
+        kv.set_key(pair.take_key().to_vec());
+        kv.set_value(pair.take_value().to_vec());
+        kv
     }
 
     fn handle_error(&self, region_error: errorpb::Error, error: String) -> String {
@@ -130,6 +137,7 @@ impl KvClient {
 mod tests {
     use super::*;
     use crate::raw::PdClient;
+    use grpcio::EnvBuilder;
 
     #[test]
     fn test_kvclient() {
@@ -157,7 +165,7 @@ mod tests {
         
     }
     #[test]
-    fn test_scan_kvclient() {
+    fn test_raw_scan_kvclient() {
         let env = Arc::new(
             EnvBuilder::new()
                 .cq_count(1)       // 设置队列深度和poll线程
@@ -166,10 +174,10 @@ mod tests {
         );
         let pd = PdClient::connect("127.0.0.1:2379".to_string(), env.clone()).unwrap();
         let kv1 = KvClient::connect("127.0.0.1:20162".to_string(), env.clone()).unwrap();
-        let key = "b9900".to_string().into_bytes();
-        let key2 = "ccc".to_string().into_bytes();
+        let key = "d5080".to_string().into_bytes();
+        let key2 = "f".to_string().into_bytes();
         let rcont = pd.creat_raw_context(key.clone()).unwrap();
         println!("{:?}", rcont);
-        println!("kv1:{:?}", kv1.raw_scan(rcont.clone(), key.clone(), key2.clone(), 200));
+        println!("kv1:{:?}", kv1.raw_scan(rcont.clone(), key.clone(), key2.clone(), 10));
     }
 }

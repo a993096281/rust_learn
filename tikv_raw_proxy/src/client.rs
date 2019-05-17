@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use grpcio::{ChannelBuilder, EnvBuilder};
 
-use crate::protos::proxy::{ResponseStatus, GetRequest, GetResponse, PutRequest, PutResponse, DeleteRequest, DeleteResponse, ScanRequest, ScanResponse};
+use crate::protos::proxy::{ResponseStatus, GetRequest, PutRequest, DeleteRequest, ScanRequest};
 use crate::protos::proxy_grpc::ProxyClient;
 
 use crate::{Key, Value, Result};
@@ -61,6 +61,26 @@ impl Client {
             Ok(res) => {
                 match res.status {
                     ResponseStatus::kSuccess => Ok(()),
+                    _ => Err(res.err),
+                }
+            },
+            Err(e) => {
+                return Err(e.to_string());
+            }
+        }
+    }
+    pub fn scan(&self, key_start: Key, key_end: Key, limit: u32) -> Result<Vec<(Key, Value)>> {
+        let mut request = ScanRequest::new();
+        request.set_key_start(key_start);
+        request.set_key_end(key_end);
+        request.set_limit(limit);
+        match self.client.scan(&request) {
+            Ok(mut res) => {
+                match res.status {
+                    ResponseStatus::kSuccess => {
+                        let kvs = res.take_pair().into_vec().into_iter().map( |mut kv| (kv.take_key(), kv.take_value())).collect();
+                        return Ok(kvs);
+                    },
                     _ => Err(res.err),
                 }
             },
